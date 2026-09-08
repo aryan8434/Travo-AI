@@ -21,11 +21,11 @@ export default defineConfig({
     chunkSizeWarningLimit: 700,
     rollupOptions: {
       output: {
-        manualChunks: {
-          'react-vendor': ['react', 'react-dom'],
-          motion: ['framer-motion'],
-          markdown: ['react-markdown'],
-          icons: ['lucide-react'],
+        manualChunks(id) {
+          const normalized = id.replaceAll('\\', '/');
+          if (/node_modules\/(react|react-dom|scheduler)\//.test(normalized)) return 'react-vendor';
+          if (normalized.includes('/node_modules/framer-motion/')) return 'motion';
+          if (normalized.includes('/node_modules/lucide-react/')) return 'icons';
         },
       },
     },

@@ -1,0 +1,309 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "TravoAI single-instance production host. Requires an existing private S3 release bucket and SSM SecureString environment.",
+  "Parameters": {
+    "ArtifactBucket": {
+      "Type": "String",
+      "AllowedPattern": "[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]"
+    },
+    "ArtifactKey": {
+      "Type": "String",
+      "AllowedPattern": "releases/[a-f0-9]{64}\\.tar\\.gz"
+    },
+    "ArtifactSha256": {
+      "Type": "String",
+      "AllowedPattern": "[a-f0-9]{64}"
+    },
+    "EnvironmentParameter": {
+      "Type": "String",
+      "Default": "/travo/production/env",
+      "AllowedPattern": "/[a-zA-Z0-9_./-]+"
+    },
+    "DomainName": {
+      "Type": "String",
+      "AllowedPattern": "[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+"
+    },
+    "InstanceType": {
+      "Type": "String",
+      "Default": "t3.small",
+      "AllowedValues": [
+        "t3.small",
+        "t3.medium"
+      ]
+    },
+    "AmiId": {
+      "Type": "AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>",
+      "Default": "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
+    }
+  },
+  "Resources": {
+    "Vpc": {
+      "Type": "AWS::EC2::VPC",
+      "Properties": {
+        "CidrBlock": "10.42.0.0/16",
+        "EnableDnsSupport": true,
+        "EnableDnsHostnames": true
+      }
+    },
+    "InternetGateway": {
+      "Type": "AWS::EC2::InternetGateway"
+    },
+    "GatewayAttachment": {
+      "Type": "AWS::EC2::VPCGatewayAttachment",
+      "Properties": {
+        "VpcId": {
+          "Ref": "Vpc"
+        },
+        "InternetGatewayId": {
+          "Ref": "InternetGateway"
+        }
+      }
+    },
+    "Subnet": {
+      "Type": "AWS::EC2::Subnet",
+      "Properties": {
+        "VpcId": {
+          "Ref": "Vpc"
+        },
+        "CidrBlock": "10.42.1.0/24",
+        "MapPublicIpOnLaunch": true
+      }
+    },
+    "RouteTable": {
+      "Type": "AWS::EC2::RouteTable",
+      "Properties": {
+        "VpcId": {
+          "Ref": "Vpc"
+        }
+      }
+    },
+    "Route": {
+      "Type": "AWS::EC2::Route",
+      "DependsOn": "GatewayAttachment",
+      "Properties": {
+        "RouteTableId": {
+          "Ref": "RouteTable"
+        },
+        "DestinationCidrBlock": "0.0.0.0/0",
+        "GatewayId": {
+          "Ref": "InternetGateway"
+        }
+      }
+    },
+    "RouteAssociation": {
+      "Type": "AWS::EC2::SubnetRouteTableAssociation",
+      "Properties": {
+        "SubnetId": {
+          "Ref": "Subnet"
+        },
+        "RouteTableId": {
+          "Ref": "RouteTable"
+        }
+      }
+    },
+    "SecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "GroupDescription": "HTTPS and certificate validation only; administration uses SSM",
+        "VpcId": {
+          "Ref": "Vpc"
+        },
+        "SecurityGroupIngress": [
+          {
+            "IpProtocol": "tcp",
+            "FromPort": 80,
+            "ToPort": 80,
+            "CidrIp": "0.0.0.0/0"
+          },
+          {
+            "IpProtocol": "tcp",
+            "FromPort": 443,
+            "ToPort": 443,
+            "CidrIp": "0.0.0.0/0"
+          }
+        ],
+        "SecurityGroupEgress": [
+          {
+            "IpProtocol": "tcp",
+            "FromPort": 80,
+            "ToPort": 80,
+            "CidrIp": "0.0.0.0/0"
+          },
+          {
+            "IpProtocol": "tcp",
+            "FromPort": 443,
+            "ToPort": 443,
+            "CidrIp": "0.0.0.0/0"
+          },
+          {
+            "IpProtocol": "tcp",
+            "FromPort": 27017,
+            "ToPort": 27017,
+            "CidrIp": "0.0.0.0/0"
+          }
+        ]
+      }
+    },
+    "Role": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "ec2.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "ManagedPolicyArns": [
+          {
+            "Fn::Sub": "arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore"
+          }
+        ],
+        "Policies": [
+          {
+            "PolicyName": "ReleaseAndEnvironment",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": "s3:GetObject",
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:s3:::${ArtifactBucket}/${ArtifactKey}"
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": "ssm:GetParameter",
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${EnvironmentParameter}"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "Profile": {
+      "Type": "AWS::IAM::InstanceProfile",
+      "Properties": {
+        "Roles": [
+          {
+            "Ref": "Role"
+          }
+        ]
+      }
+    },
+    "Instance": {
+      "Type": "AWS::EC2::Instance",
+      "DependsOn": [
+        "Route",
+        "RouteAssociation"
+      ],
+      "Properties": {
+        "ImageId": {
+          "Ref": "AmiId"
+        },
+        "InstanceType": {
+          "Ref": "InstanceType"
+        },
+        "IamInstanceProfile": {
+          "Ref": "Profile"
+        },
+        "SubnetId": {
+          "Ref": "Subnet"
+        },
+        "SecurityGroupIds": [
+          {
+            "Ref": "SecurityGroup"
+          }
+        ],
+        "MetadataOptions": {
+          "HttpTokens": "required",
+          "HttpPutResponseHopLimit": 1,
+          "HttpEndpoint": "enabled"
+        },
+        "CreditSpecification": {
+          "CPUCredits": "standard"
+        },
+        "BlockDeviceMappings": [
+          {
+            "DeviceName": "/dev/xvda",
+            "Ebs": {
+              "VolumeType": "gp3",
+              "VolumeSize": 40,
+              "Encrypted": true,
+              "DeleteOnTermination": true
+            }
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Sub": "${AWS::StackName}"
+            }
+          },
+          {
+            "Key": "Application",
+            "Value": "TravoAI"
+          }
+        ],
+        "UserData": {
+          "Fn::Base64": {
+            "Fn::Sub": "#!/bin/bash\nset -euo pipefail\numask 077\ndnf install -y docker awscli-2\nsystemctl enable --now docker\ninstall -d /opt/travo\naws s3 cp 's3://${ArtifactBucket}/${ArtifactKey}' /opt/travo-release.tar.gz --region '${AWS::Region}' --only-show-errors\nprintf '%s  %s\\n' '${ArtifactSha256}' /opt/travo-release.tar.gz | sha256sum -c -\ntar -xzf /opt/travo-release.tar.gz -C /opt/travo\nbash /opt/travo/deploy/aws/bootstrap.sh '${AWS::Region}' '${EnvironmentParameter}' '${DomainName}'\n"
+          }
+        }
+      }
+    },
+    "PublicIp": {
+      "Type": "AWS::EC2::EIP",
+      "DependsOn": "GatewayAttachment",
+      "Properties": {
+        "Domain": "vpc"
+      }
+    },
+    "IpAssociation": {
+      "Type": "AWS::EC2::EIPAssociation",
+      "Properties": {
+        "InstanceId": {
+          "Ref": "Instance"
+        },
+        "AllocationId": {
+          "Fn::GetAtt": [
+            "PublicIp",
+            "AllocationId"
+          ]
+        }
+      }
+    }
+  },
+  "Outputs": {
+    "InstanceId": {
+      "Value": {
+        "Ref": "Instance"
+      }
+    },
+    "PublicIp": {
+      "Value": {
+        "Ref": "PublicIp"
+      }
+    },
+    "Website": {
+      "Value": {
+        "Fn::Sub": "https://${DomainName}"
+      }
+    },
+    "SessionManager": {
+      "Value": {
+        "Fn::Sub": "https://${AWS::Region}.console.aws.amazon.com/systems-manager/session-manager/${Instance}?region=${AWS::Region}"
+      }
+    }
+  }
+}

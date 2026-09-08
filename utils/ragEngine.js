@@ -3,7 +3,10 @@ import path from "path";
 import crypto from "crypto";
 import { fileURLToPath } from "url";
 import { LocalIndex } from "vectra";
-import { embedText, embedBatch, embeddingProvider, flushEmbedCache } from "./embeddings.js";
+import { embedBatch, embedRecords, embeddingProvider, embeddingModel, flushEmbedCache, INDEX_DIR } from "./embeddings.js";
+
+import { parseTravelPreferences } from "./travelPreferences.js";
+import { rankChunks } from "./retrieval.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -12,8 +15,8 @@ const dataRootDir = path.join(__dirname, "../data");
 const packagesSubDir = path.join(__dirname, "../data/packages");
 const singlePackagesFilePath = path.join(__dirname, "../data/packages.json");
 const uploadsDir = path.join(__dirname, "../uploads");
-const vectraFolder = path.join(__dirname, "../vectra_index");
-const manifestPath = path.join(vectraFolder, "manifest.json");
+const vectraFolder = INDEX_DIR;
+
 
 [dataRootDir, packagesSubDir, uploadsDir, vectraFolder].forEach((dir) => {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -42,36 +45,23 @@ export function budgetTier(price) {
 ================================================================ */
 let _pkgCache = { key: "", packages: [] };
 
-function newestMtime(dirPath) {
-  let newest = 0;
-  const walk = (p) => {
-    let entries;
-    try {
-      entries = fs.readdirSync(p, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const e of entries) {
-      const full = path.join(p, e.name);
-      if (e.isDirectory()) walk(full);
-      else {
-        try {
-          newest = Math.max(newest, fs.statSync(full).mtimeMs);
-        } catch {
-          /* ignore */
-        }
-      }
+let lastScan = 0;
+let fingerprint = '';
+function newestMtime(dirPath, force = false) {
+  if (!force && Date.now() - lastScan < 1000) return fingerprint;
+  const entries = [];
+  const walk = dir => {
+    if (!fs.existsSync(dir)) return;
+    for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, ent.name);
+      if (ent.isDirectory()) walk(full);
+      else if (ent.name.endsWith('.json')) { const stat = fs.statSync(full); entries.push(full + ':' + stat.mtimeMs + ':' + stat.size); }
     }
   };
   walk(dirPath);
-  try {
-    if (fs.existsSync(singlePackagesFilePath)) {
-      newest = Math.max(newest, fs.statSync(singlePackagesFilePath).mtimeMs);
-    }
-  } catch {
-    /* ignore */
-  }
-  return newest;
+  if (fs.existsSync(singlePackagesFilePath)) { const st = fs.statSync(singlePackagesFilePath); entries.push(st.mtimeMs + ':' + st.size); }
+  fingerprint = entries.sort().join('|'); lastScan = Date.now();
+  return fingerprint;
 }
 
 function scanJsonFiles(dirPath) {
@@ -125,7 +115,7 @@ export function loadAllPackages() {
 /* ================================================================
    TEXT BUILDERS + CHUNKING
 ================================================================ */
-function summaryText(pkg) {
+export function summaryText(pkg) {
   const highlights = (pkg.highlights || []).join(". ");
   const itinerary = (pkg.itinerary || [])
     .map((d) => `Day ${d.day}: ${d.title} - ${(d.activities || []).join(", ")} ${d.description || ""}`)
@@ -138,6 +128,9 @@ function summaryText(pkg) {
     `Hotel: ${pkg.hotel_name || ""} (${pkg.hotel_tier || ""}). Rating: ${pkg.rating || 4.5} stars`,
     `Best months: ${(pkg.best_months || []).join(", ")}. Weather: ${pkg.weather || ""}`,
     `Description: ${pkg.description || ""}`,
+    `Included services: ${JSON.stringify(pkg.included_services || {})}`,
+    `Excluded services: ${JSON.stringify(pkg.excluded_services || pkg.exclusions || [])}`,
+    `Cancellation: ${JSON.stringify(pkg.cancellation_policy || "Contact the supplier for package-specific terms")}`,
     `Highlights: ${highlights}`,
     `Itinerary: ${itinerary}`,
     `Tags: ${(pkg.tags || []).join(" ")}`,
@@ -148,7 +141,7 @@ function summaryText(pkg) {
  * Split a long markdown guide into ~350-word overlapping chunks, keeping the
  * nearest preceding "## Heading" as a section label on each chunk.
  */
-function chunkGuide(guide, { words = 350, overlap = 60 } = {}) {
+export function chunkGuide(guide, { words = 350, overlap = 60 } = {}) {
   if (!guide || typeof guide !== "string") return [];
   const lines = guide.split(/\r?\n/);
   const tokens = []; // { w, section }
@@ -201,20 +194,31 @@ function desiredRecords(pkg) {
   records.push({
     chunkId: `${pkg.package_id}::summary`,
     text: summary,
-    metadata: { ...baseMeta, kind: "summary", section: "Summary", rawPackage: JSON.stringify(pkg) },
+    metadata: {
+      ...baseMeta,
+      chunk_id: `${pkg.package_id}::summary`,
+      kind: "summary",
+      section: "Summary",
+      text: summary,
+      word_count: summary.split(/\s+/).filter(Boolean).length,
+      content_status: pkg.content_status || "legacy",
+    },
   });
 
-  const guide = pkg.detailed_guide || pkg.full_guide || "";
+  const guide = pkg.content_status === "complete" ? (pkg.detailed_guide || pkg.full_guide || "") : "";
   chunkGuide(guide).forEach((c, i) => {
     records.push({
       chunkId: `${pkg.package_id}::guide::${i}`,
       text: `${pkg.title} — ${c.section}\n${c.text}`,
       metadata: {
         ...baseMeta,
+        chunk_id: `${pkg.package_id}::guide::${i}`,
         kind: "guide",
         section: c.section,
         chunk_index: i,
-        rawPackage: JSON.stringify({ package_id: pkg.package_id }),
+        text: c.text,
+        word_count: c.text.split(/\s+/).filter(Boolean).length,
+        content_status: pkg.content_status,
       },
     });
   });
@@ -225,93 +229,43 @@ function desiredRecords(pkg) {
 /* ================================================================
    INCREMENTAL VECTRA SYNC
 ================================================================ */
-function loadManifest() {
-  try {
-    return JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
-  } catch {
-    return {};
-  }
-}
-function saveManifest(m) {
-  try {
-    fs.writeFileSync(manifestPath, JSON.stringify(m, null, 0));
-  } catch (err) {
-    console.warn("manifest write failed:", err.message);
-  }
-}
-
 let _syncing = null;
-
+let lastSynced = '';
 export async function syncVectraIndex({ force = false } = {}) {
-  if (_syncing) return _syncing;
+  if (_syncing) { await _syncing; if (!force) return; }
   _syncing = (async () => {
+    const sourceKey = newestMtime(packagesSubDir, force);
+    if (!force && lastSynced === sourceKey && await index.isIndexCreated()) return;
+    if (!(await index.isIndexCreated())) await index.createIndex();
+    const packages = loadAllPackages();
+    const existing = await index.listItems();
+    const desired = packages.flatMap(desiredRecords).map(rec => ({ ...rec, id: sha1(rec.chunkId), hash: sha1(JSON.stringify(rec.metadata) + embeddingModel() + ':v4') }));
+    const previous = new Map(existing.map(item => [item.id, item]));
+    const changed = desired.filter(rec => force || previous.get(rec.id)?.metadata?.record_hash !== rec.hash);
+    const wanted = new Set(desired.map(r => r.id));
+    const removed = existing.filter(item => !wanted.has(item.id));
+    const vectors = await embedRecords(changed.map(rec => rec.text));
+    // One atomic Vectra commit, no duplicate records on --force.
+    await index.beginUpdate();
     try {
-      if (!(await index.isIndexCreated())) await index.createIndex();
-
-      const packages = loadAllPackages();
-      const manifest = force ? {} : loadManifest();
-      const nextManifest = {};
-
-      // Build the full set of desired chunk records.
-      const desired = [];
-      for (const pkg of packages) {
-        for (const rec of desiredRecords(pkg)) {
-          rec.hash = sha1(`${embeddingProvider()}::${rec.text}`);
-          desired.push(rec);
-        }
+      for (const item of removed) await index.deleteItem(item.id);
+      for (let i = 0; i < changed.length; i++) {
+        const rec = changed[i], embedding = vectors[i];
+        await index.upsertItem({ id: rec.id, vector: embedding.vector, metadata: { ...rec.metadata, record_hash: rec.hash, embedding_model: embedding.model, embedding_provider: embedding.provider } });
       }
-      const desiredIds = new Set(desired.map((d) => d.chunkId));
-
-      // Delete stale / changed items.
-      let deletions = 0;
-      for (const [chunkId, entry] of Object.entries(manifest)) {
-        const stillWanted = desiredIds.has(chunkId);
-        const same = stillWanted && desired.find((d) => d.chunkId === chunkId)?.hash === entry.hash;
-        if (same) {
-          nextManifest[chunkId] = entry;
-        } else if (entry.itemId) {
-          try {
-            await index.deleteItem(entry.itemId);
-            deletions++;
-          } catch {
-            /* already gone */
-          }
-        }
-      }
-
-      // Insert new / changed items.
-      const toInsert = desired.filter((d) => !nextManifest[d.chunkId]);
-      if (toInsert.length) {
-        console.log(
-          `⚡ RAG sync: ${toInsert.length} new/changed chunks, ${deletions} removed (${packages.length} packages)`,
-        );
-        const vectors = await embedBatch(toInsert.map((d) => d.text));
-        for (let i = 0; i < toInsert.length; i++) {
-          const d = toInsert[i];
-          try {
-            const item = await index.insertItem({ vector: vectors[i], metadata: d.metadata });
-            nextManifest[d.chunkId] = { hash: d.hash, itemId: item.id };
-          } catch (err) {
-            console.warn(`insert failed for ${d.chunkId}:`, err.message);
-          }
-        }
-        flushEmbedCache();
-      } else {
-        console.log(`✅ RAG index up to date (${packages.length} packages, ${desired.length} chunks)`);
-      }
-
-      saveManifest(nextManifest);
-    } catch (err) {
-      console.warn("Vectra sync warning:", err.message);
-    } finally {
-      _syncing = null;
-    }
+      await index.endUpdate();
+    } catch (err) { index.cancelUpdate(); throw err; }
+    flushEmbedCache(); lastSynced = sourceKey;
+    console.log('RAG sync:', packages.length, 'packages;', desired.length, 'chunks;', changed.length, 'updated;', removed.length, 'removed');
+    return { packages: packages.length, chunks: desired.length, updated: changed.length };
   })();
-  return _syncing;
+  try { return await _syncing; } finally { _syncing = null; }
 }
-
-// Kick off a sync on startup (non-blocking).
-syncVectraIndex().catch(() => {});
+export function startPackageWatcher() {
+  syncVectraIndex().catch(err => console.error('RAG sync failed:', err.message));
+  const timer = setInterval(() => syncVectraIndex().catch(err => console.error('RAG sync failed:', err.message)), 5000);
+  timer.unref(); return () => clearInterval(timer);
+}
 
 /* ================================================================
    RETRIEVAL  (metadata filter -> vector search -> composite rerank)
@@ -325,24 +279,32 @@ function matchesBudget(pkg, { budget, budgetMin, budgetMax, budgetTier: tier }) 
   }
   if (budgetMin != null && price < Number(budgetMin)) return false;
   if (budgetMax != null && price > Number(budgetMax)) return false;
-  if (budget != null && price > Number(budget) * 1.25) return false;
+  if (budget != null && price > Number(budget)) return false;
   return true;
 }
 
 export async function retrievePackages(query = "", filters = {}, topK = 6) {
+  const stated = parseTravelPreferences(query);
+  const maximums = [filters.budgetMax, filters.budget, stated.budgetMax].filter(v => v != null);
+  const minimums = [filters.budgetMin, stated.budgetMin].filter(v => v != null);
+  filters = { ...stated, ...filters, budgetMax: maximums.length ? Math.min(...maximums) : null, budgetMin: minimums.length ? Math.max(...minimums) : null,
+    budgetTier: filters.budgetTier || stated.budgetTier,
+    people: filters.people ?? stated.people,
+    city: filters.city || (filters.packageId ? null : resolvePackageLocation(query)?.value),
+  };
+  if (typeof query !== 'string' || query.length > 2000) throw new Error('Invalid search query');
   const allPackages = loadAllPackages();
   if (allPackages.length === 0) {
     return { matches: [], contextText: "No packages available.", vectorDbUsed: "Vectra" };
   }
-  const byId = new Map(allPackages.map((p) => [p.package_id, p]));
+  await syncVectraIndex();
 
   // STEP 1 — metadata filtering
   // With an explicit location, budget/tier only *rank* (soft) — the user asked
   // to see that location, not an empty list.
-  let candidates = filters.softBudget
-    ? [...allPackages]
-    : allPackages.filter((p) => matchesBudget(p, filters));
-  if (candidates.length === 0) candidates = [...allPackages];
+  let candidates = allPackages.filter((p) => matchesBudget(p, filters));
+  if (filters.people != null) candidates = candidates.filter(p => Number(p.capacity_people || 1) >= filters.people);
+  if (filters.packageId) candidates = candidates.filter(p => p.package_id === filters.packageId);
 
   const locationTerm = (filters.city || filters.destination || "").toLowerCase().trim();
   const locationMatch = (p) => {
@@ -357,7 +319,7 @@ export async function retrievePackages(query = "", filters = {}, topK = 6) {
 
   if (locationTerm) {
     const cityMatches = candidates.filter(locationMatch);
-    if (cityMatches.length) candidates = cityMatches;
+    candidates = cityMatches;
   }
 
   if (filters.category && filters.category !== "ALL") {
@@ -367,7 +329,7 @@ export async function retrievePackages(query = "", filters = {}, topK = 6) {
         p.category?.toLowerCase().includes(c) ||
         (p.tags || []).some((tg) => tg.toLowerCase().includes(c)),
     );
-    if (catMatches.length) candidates = catMatches;
+    candidates = catMatches;
   }
 
   // STEP 2 — vector search, grouped back to parent package
@@ -377,31 +339,14 @@ export async function retrievePackages(query = "", filters = {}, topK = 6) {
       .filter(Boolean)
       .join(" ");
 
+  const eligible = new Set(candidates.map(p => p.package_id));
   const pkgVectorScore = new Map();
-  try {
-    const qv = await embedText(queryText);
-    const results = await index.queryItems(qv, topK * 6);
-    for (const r of results || []) {
-      const pid = r.item?.metadata?.package_id;
-      if (!pid) continue;
-      const score = r.score || 0;
-      pkgVectorScore.set(pid, Math.max(pkgVectorScore.get(pid) || 0, score));
-    }
-  } catch (err) {
-    console.warn("Vector query warning:", err.message);
+  const ranked = await rankChunks(await index.listItems(), queryText, { filter: item => eligible.has(item.metadata?.package_id) });
+  for (const hit of ranked.scores) {
+    const id = hit.item.metadata.package_id;
+    pkgVectorScore.set(id, Math.max(pkgVectorScore.get(id) || 0, hit.score));
   }
-
-  // Candidate pool = metadata candidates ∪ vector hits
-  const pool = new Map();
-  for (const p of candidates) pool.set(p.package_id, p);
-  for (const pid of pkgVectorScore.keys()) {
-    if (byId.has(pid)) pool.set(pid, byId.get(pid));
-  }
-
-  // Strict location mode: never let vector hits pull in other states/cities.
-  if (filters.strictCity && locationTerm) {
-    for (const [pid, p] of pool) if (!locationMatch(p)) pool.delete(pid);
-  }
+  const pool = new Map(candidates.map(p => [p.package_id, p]));
 
   // STEP 3 — composite rerank
   const currentMonth = new Date().toLocaleString("en-US", { month: "long" });
@@ -449,7 +394,7 @@ export async function retrievePackages(query = "", filters = {}, topK = 6) {
       seasonScore * w.season +
       tierScore * w.tier;
 
-    const matchPct = Math.round(Math.min(99, Math.max(72, finalScore * 100)));
+    const matchPct = Math.round(Math.min(100, Math.max(0, finalScore * 100)));
 
     const reasons = [];
     if (ref && price <= ref) reasons.push(`Within your ₹${Number(ref).toLocaleString("en-IN")} budget`);
@@ -478,6 +423,8 @@ export async function retrievePackages(query = "", filters = {}, topK = 6) {
 
   return {
     matches: finalMatches,
+    total: scored.length,
+    sources: ranked.scores.filter(h => finalMatches.some(p => p.package_id === h.item.metadata.package_id)).slice(0, 6).map(h => ({ chunk_id: h.item.metadata.chunk_id, package_id: h.item.metadata.package_id, title: h.item.metadata.title, section: h.item.metadata.section, text: h.item.metadata.text, score: h.score })),
     contextText,
     vectorDbUsed: `Vectra hybrid (${embeddingProvider()} embeddings)`,
   };
@@ -525,21 +472,10 @@ export function resolvePackageLocation(text) {
     if (p.country) countrySet.add(p.country);
   }
 
-  const contains = (name) => {
-    const n = name.toLowerCase();
-    return q === n || q.includes(n) || n.includes(q);
-  };
-
-  for (const s of stateSet) if (contains(s)) return tally("state", s, pkgs);
-  for (const c of countrySet) if (c !== "India" && contains(c)) return tally("country", c, pkgs);
-  for (const d of destSet) if (contains(d)) return tally("destination", d, pkgs);
-
-  // token overlap fallback (e.g. "backwaters" -> Kerala via tags)
-  for (const p of pkgs) {
-    if ((p.tags || []).some((tg) => q.includes(tg.toLowerCase()) && tg.length > 3)) {
-      return tally("state", p.state || p.destination, pkgs);
-    }
-  }
+  const contains = name => (' ' + q + ' ').includes(' ' + name.toLowerCase() + ' ');
+  for (const d of [...destSet].sort((a, b) => b.length - a.length)) if (contains(d)) return tally('destination', d, pkgs);
+  for (const state of stateSet) if (contains(state)) return tally('state', state, pkgs);
+  for (const c of countrySet) if (contains(c)) return tally('country', c, pkgs);
   return null;
 }
 
@@ -575,11 +511,18 @@ export async function ingestPackageGuide(packageId, guideText) {
   const pkg = arr.find((p) => (p.package_id || "") === packageId);
   if (!pkg) throw new Error(`package_id ${packageId} not in ${target}`);
 
+  const wordCount = guideText.trim().split(/\s+/).length;
+  if (wordCount < 2000 || wordCount > 2500) throw new Error('Guide must contain 2000–2500 words');
+  const expectedHeadings = (pkg.detailed_guide || '').match(/^## .+$/gm) || [];
+  const headings = guideText.match(/^## .+$/gm) || [];
+  if (JSON.stringify(headings) !== JSON.stringify(expectedHeadings)) throw new Error('Guide must preserve every section heading in order');
   pkg.detailed_guide = guideText;
   pkg.content_status = "complete";
   pkg.word_count = guideText.split(/\s+/).filter(Boolean).length;
 
-  fs.writeFileSync(target, JSON.stringify(Array.isArray(parsed) ? arr : arr[0], null, 2));
+  fs.writeFileSync(`${target}.tmp`, JSON.stringify(Array.isArray(parsed) ? arr : arr[0], null, 2));
+  fs.renameSync(`${target}.tmp`, target);
+  lastScan = 0;
   _pkgCache = { key: "", packages: [] };
   await syncVectraIndex();
   return { file: target, word_count: pkg.word_count };

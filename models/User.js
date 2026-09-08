@@ -7,8 +7,11 @@ const UserSchema = new mongoose.Schema({
   // Stores a bcrypt hash only — never a plaintext password.
   passwordHash: { type: String, required: true },
 
+  ledgerVersion: { type: Number, default: 0 },
+  paymentReviewRequired: { type: Boolean, default: false },
   wallet: { type: Number, default: 0 },
   bookings: { type: Array, default: [] },
+  paymentOrders: { type: Array, default: [] },
   paymentMethods: { type: Array, default: [] },
   walletHistory: { type: Array, default: [] },
 

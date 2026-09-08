@@ -66,8 +66,12 @@ const GUIDE_SECTIONS = [
 
 function buildGuideSkeleton(ctx) {
   const lines = [`# ${ctx.title} — Complete Travel Guide`, ""];
-  for (const [heading, seed] of GUIDE_SECTIONS) {
-    lines.push(`## ${heading}`, "", seed(ctx), "");
+  const budgets = [160, 120, 140, 550, 150, 160, 130, 180, 130, 110, 120, 100, 160, 90];
+  for (const [i, [heading, seed]] of GUIDE_SECTIONS.entries()) {
+    const content = heading === 'Day-by-Day Deep Dive'
+      ? 'Expand the structured ' + ctx.days + '-day itinerary into exactly about 550 words TOTAL, divided between days. Cover morning, afternoon and evening without adding unlisted inclusions.'
+      : seed(ctx).replace(/(?:roughly|~)\s*\d+ words/g, '~' + budgets[i] + ' words');
+    lines.push('## ' + heading, '', content, 'Section budget: ' + budgets[i] + ' words.', '');
   }
   lines.push(
     "---",
@@ -110,7 +114,7 @@ function makePackage(dest, tierKey) {
   const nights = days - 1;
 
   const basePrice = dest.anchor * tier.mult * (0.9 + rng() * 0.25);
-  const price = clampPrice(round(basePrice, tierKey === "economical" ? 500 : 1000));
+  const price = dest.slug === "maldives" && tierKey === "luxury" ? 500000 : clampPrice(round(basePrice, tierKey === "economical" ? 500 : 1000));
 
   const regionLabel = dest.region === "international" ? dest.country : `${dest.state}, India`;
   const place = dest.name;
@@ -226,7 +230,7 @@ for (const dest of DESTINATIONS) {
       try {
         const existing = JSON.parse(fs.readFileSync(file, "utf-8"));
         const rec = Array.isArray(existing) ? existing[0] : existing;
-        if (rec?.content_status === "complete") {
+        if (rec && rec.content_status !== "skeleton") {
           skipped++;
           summary[tierKey]++;
           continue;

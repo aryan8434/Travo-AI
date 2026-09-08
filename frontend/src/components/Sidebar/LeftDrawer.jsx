@@ -1,15 +1,17 @@
 import React from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Home, Package, CreditCard, BookmarkCheck, Wallet, HelpCircle, Info, Settings, X, Compass, Sparkles, ExternalLink, ShieldCheck } from 'lucide-react';
+import { Home, Plane, Package, CreditCard, BookmarkCheck, Wallet, HelpCircle, Info, Settings, X, Compass, Sparkles, ExternalLink, ShieldCheck, Database } from 'lucide-react';
 import { backdrop, slideInLeft } from '../../lib/motion';
 
 export default function LeftDrawer({ isOpen, onClose, currentView, setCurrentView }) {
   const menuItems = [
     { id: 'home', label: 'Home (AI Agent)', icon: Home, badge: 'RAG' },
     { id: 'wallet', label: 'TravoAI Wallet', icon: Wallet, badge: 'Pay' },
+    { id: 'flights', label: 'Flight Distances', icon: Plane, badge: 'INR' },
     { id: 'packages', label: 'Travel Packages', icon: Package, badge: 'Catalog' },
     { id: 'transactions', label: 'Transaction History', icon: CreditCard, badge: 'Live' },
     { id: 'bookings', label: 'My Bookings', icon: BookmarkCheck, badge: 'Tickets' },
+    { id: 'rag', label: 'RAG Explorer', icon: Database, badge: 'Vectors' },
     { id: 'admin', label: 'Admin RAG Panel', icon: Settings, badge: 'Control' },
     { id: 'support', label: 'Help & Support', icon: HelpCircle, badge: '24/7' },
     { id: 'about', label: 'About TravoAI', icon: Info, badge: 'v1.0' },
@@ -40,7 +42,7 @@ export default function LeftDrawer({ isOpen, onClose, currentView, setCurrentVie
             initial="hidden"
             animate="show"
             exit="exit"
-            className="fixed left-0 top-0 bottom-0 w-72 glass-panel border-r border-slate-800 bg-[#0f172a]/95 text-slate-100 flex flex-col justify-between p-4 shadow-2xl z-50"
+            className="fixed left-0 top-0 bottom-0 w-72 overflow-y-auto glass-panel border-r border-slate-800 bg-[#0f172a]/95 text-slate-100 flex flex-col justify-between p-4 shadow-2xl z-50"
           >
         {/* Top Header */}
         <div>

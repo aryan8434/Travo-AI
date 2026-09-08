@@ -1,5 +1,6 @@
 import React, { useState, useEffect, lazy, Suspense } from 'react';
 import axios from 'axios';
+import { recoverPendingPayment } from './utils/razorpay';
 import Header from './components/Header';
 import ChatBox from './components/Chat/ChatBox';
 import RightSidebar from './components/Sidebar/RightSidebar';
@@ -7,17 +8,19 @@ import LeftDrawer from './components/Sidebar/LeftDrawer';
 import AuthModal from './components/Auth/AuthModal';
 
 // Pages — lazy so each is a separate chunk, loaded on first navigation
+const FlightsView = lazy(() => import('./components/Pages/FlightsView'));
 const PackagesView = lazy(() => import('./components/Pages/PackagesView'));
 const TransactionsView = lazy(() => import('./components/Pages/TransactionsView'));
 const BookingsView = lazy(() => import('./components/Pages/BookingsView'));
 const SupportView = lazy(() => import('./components/Pages/SupportView'));
 const AboutView = lazy(() => import('./components/Pages/AboutView'));
 const AdminView = lazy(() => import('./components/Pages/AdminView'));
+const RagExplorerView = lazy(() => import('./components/Pages/RagExplorerView'));
 const WalletView = lazy(() => import('./components/Pages/WalletView'));
 const RagArchitectureModal = lazy(() => import('./components/Pages/RagArchitectureModal'));
 
 // Storage
-import { getStoredTransactions, getStoredBookings, getWalletBalance } from './utils/storage';
+import { getStoredTransactions, getStoredBookings, getWalletBalance, refreshAccount, clearAccount } from './utils/storage';
 
 const ViewFallback = () => (
   <div className="flex-1 flex items-center justify-center text-xs text-slate-500 animate-pulse">
@@ -26,18 +29,18 @@ const ViewFallback = () => (
 );
 
 export default function App() {
-  const [messages, setMessages] = useState([]);
+  const [messages, setMessages] = useState([{ sender: 'bot', text: 'Welcome to **TravoAI**. Find holiday packages, compare travel tiers, and estimate flights across India. Try **Goa packages under ₹50,000** or choose a destination from the menu.' }]);
   const [loading, setLoading] = useState(false);
-  const [activeCity, setActiveCity] = useState('');
+  const [activeCity, setActiveCity] = useState('Delhi');
   const [selectedCategory, setSelectedCategory] = useState('all');
-  const [sessionId] = useState(() => 'sess_' + Math.random().toString(36).substr(2, 9));
+  const [sessionId] = useState(() => crypto.randomUUID());
 
   // User Auth & Modal state
   const [currentUser, setCurrentUser] = useState(() => {
     try {
       const saved = localStorage.getItem('travoai_user');
       return saved ? JSON.parse(saved) : null;
-    } catch (e) {
+    } catch {
       return null;
     }
   });
@@ -55,38 +58,39 @@ export default function App() {
   const [transactions, setTransactions] = useState([]);
   const [bookings, setBookings] = useState([]);
 
-  // Refresh storage data whenever view changes
+  // Refresh the authenticated server account whenever navigation changes
   useEffect(() => {
-    setTransactions(getStoredTransactions());
-    setBookings(getStoredBookings());
-    setWalletBalance(getWalletBalance());
-  }, [currentView, isDrawerOpen]);
+    let active = true;
+    refreshAccount().then(() => {
+      if (!active) return;
+      setTransactions(getStoredTransactions()); setBookings(getStoredBookings()); setWalletBalance(getWalletBalance());
+    }).catch(() => {});
+    return () => { active = false; };
+  }, [currentView, isDrawerOpen, currentUser]);
 
   // Restore the auth header from a persisted session on first mount.
   useEffect(() => {
     if (currentUser?.token && !axios.defaults.headers.common.Authorization) {
       axios.defaults.headers.common.Authorization = `Bearer ${currentUser.token}`;
     }
-  }, []);
+  }, [currentUser?.token]);
 
-  // Load saved chat history whenever the user changes
+  // Account-scoped history; discard responses after logout or account switches.
   useEffect(() => {
-    if (currentUser?.username) {
-      loadUserChatHistory();
-    }
-  }, [currentUser]);
-
-  const loadUserChatHistory = async () => {
-    if (!axios.defaults.headers.common.Authorization) return;
-    try {
-      const res = await axios.get('/api/chat/user-history');
-      if (res.data && res.data.messages && res.data.messages.length > 0) {
-        setMessages(res.data.messages);
+    if (!currentUser?.token) return;
+    let active = true;
+    const controller = new AbortController();
+    axios.get('/api/chat/user-history', { signal: controller.signal }).then(({ data }) => {
+      if (active && data.messages?.length) setMessages(data.messages);
+    }).catch(() => {});
+    recoverPendingPayment().then(data => {
+      if (active && data?.success) {
+        setWalletBalance(data.wallet);
+        setMessages(prev => [...prev, { sender: 'bot', text: 'Your pending payment was verified. The receipt is available in your account.', booking: data.booking, invoice: data.invoice }]);
       }
-    } catch (err) {
-      console.warn("Chat history fetch error:", err);
-    }
-  };
+    }).catch(() => {});
+    return () => { active = false; controller.abort(); };
+  }, [currentUser]);
 
   const handleLoginSuccess = (userObj) => {
     setCurrentUser(userObj);
@@ -94,27 +98,29 @@ export default function App() {
     if (userObj.token) {
       axios.defaults.headers.common.Authorization = `Bearer ${userObj.token}`;
     }
-    if (userObj.walletBalance) {
+    if (userObj.walletBalance != null) {
       setWalletBalance(userObj.walletBalance);
     }
-    loadUserChatHistory();
+
   };
 
   const handleLogout = () => {
+    clearAccount(); setWalletBalance(0); setBookings([]); setTransactions([]); setMessages([]);
+    sessionStorage.removeItem('travo_pending_payment');
     setCurrentUser(null);
     localStorage.removeItem('travoai_user');
     delete axios.defaults.headers.common.Authorization;
   };
 
-  const handleBookingComplete = (booking) => {
+  function handleBookingComplete(booking) {
     setWalletBalance(getWalletBalance());
 
     const isWallet = booking.paid_via_wallet;
     const nominal = Number(booking.nominal_amount ?? booking.actual_price);
-    const headerTitle = isWallet ? "🎉 **Booking Confirmed — paid from TravoAI Wallet**" : "🎉 **Booking Confirmed**";
+    const headerTitle = isWallet ? "🎉 **Payment Received — paid from TravoAI Wallet**" : "🎉 **Booking Confirmed**";
     const paymentLine = isWallet
       ? `* **Paid from Wallet**: ₹${nominal.toLocaleString('en-IN')}\n* **Remaining Balance**: ₹${Number(booking.remaining_wallet_balance || 0).toLocaleString('en-IN')}`
-      : `* **Invoice Total**: ₹${nominal.toLocaleString('en-IN')}\n* **Charged via Razorpay now**: ₹1 (confirmation fee)`;
+      : `* **Invoice Total**: ₹${nominal.toLocaleString('en-IN')}\n* **Charged via Razorpay now**: ₹${nominal.toLocaleString('en-IN')}`;
 
     const invoiceLine = booking.invoice
       ? `\n* **Invoice No.**: \`${booking.invoice.invoice_no}\``
@@ -122,7 +128,7 @@ export default function App() {
 
     const botMsg = {
       sender: 'bot',
-      text: `${headerTitle}\n\n* **Item**: ${booking.item_name}\n* **PNR Number**: \`${booking.pnr}\`\n* **Ticket Number**: \`${booking.ticket_number}\`\n* **Booking ID**: \`${booking.booking_id}\`\n* **Transaction ID**: \`${booking.txn_id || 'TXN-CONFIRMED'}\`${invoiceLine}\n${paymentLine}\n\nYour verified digital pass (with QR) and GST invoice are ready — open them from the card below or under **My Bookings**.`,
+      text: `${headerTitle}\n\n* **Item**: ${booking.item_name}\n* **PNR Number**: \`${booking.pnr}\`\n* **Ticket Number**: \`${booking.ticket_number}\`\n* **Booking ID**: \`${booking.booking_id}\`\n* **Transaction ID**: \`${booking.txn_id || 'TXN-CONFIRMED'}\`${invoiceLine}\n${paymentLine}\n\nYour payment receipt is ready. Supplier confirmation is pending — open them from the card below or under **My Bookings**.`,
       booking: booking,
       invoice: booking.invoice || null,
     };
@@ -150,90 +156,6 @@ export default function App() {
       axios.post('/api/chat/save-user-message', { message: botMsg }).catch(e => e);
     }
   };
-
-  // Request location permission on startup
-  useEffect(() => {
-    const initializeAppLocation = () => {
-      if ('geolocation' in navigator) {
-        navigator.geolocation.getCurrentPosition(
-          async (position) => {
-            try {
-              const { latitude, longitude } = position.coords;
-              const geoRes = await fetch(
-                `https://nominatim.openstreetmap.org/reverse?lat=${latitude}&lon=${longitude}&format=json`
-              );
-              const geoData = await geoRes.json();
-              const detectedCity =
-                geoData.address?.city ||
-                geoData.address?.town ||
-                geoData.address?.state_district ||
-                'Delhi';
-
-              setActiveCity(detectedCity);
-
-              // Fetch live weather for detected location
-              let weatherInfo = '';
-              try {
-                const weatherRes = await axios.post('/chat', {
-                  message: `weather in ${detectedCity}`,
-                  sessionId: 'init_location_session',
-                  userCity: detectedCity
-                });
-                if (weatherRes.data && weatherRes.data.results) {
-                  const w = weatherRes.data.results;
-                  const condText = w.condition || 'Clear';
-                  const humText = w.humidity !== undefined ? `${w.humidity}% Humidity` : '55% Humidity';
-                  const windText = w.wind_kph !== undefined ? `${w.wind_kph} km/h wind` : '12 km/h wind';
-                  weatherInfo = `\n🌤️ **Live Weather**: **${w.temp_c}°C, ${condText}** (${humText}, ${windText})`;
-                }
-              } catch (e) {
-                console.warn('Weather fetch error on startup:', e);
-              }
-
-              if (!currentUser?.username) {
-                setMessages([
-                  {
-                    sender: 'bot',
-                    text: `👋 Hi there! I'm **TravoAI**, your AI travel concierge powered by **Groq LLM** and **Vectra Vector Database**.\n\n📍 **Location Detected**: **${detectedCity}**${weatherInfo}\n\nAsk me anything like:\n* *'Need a hotel in ${detectedCity} under ₹5000'*\n* *'Book me a bus from ${detectedCity} to Jaipur tomorrow after 6 PM'*\n* *'Suggest a beach vacation under ₹40,000 for 4 people'*`
-                  }
-                ]);
-              }
-            } catch (err) {
-              fallbackDefaultGreeting('Delhi');
-            }
-          },
-          (error) => {
-            console.warn('Geolocation denied/failed:', error.message);
-            if (!currentUser?.username) {
-              setMessages([
-                {
-                  sender: 'bot',
-                  text: "👋 Hi there! I'm **TravoAI**, your AI travel concierge powered by **Groq LLM** and **Vectra Vector Database**.\n\n⚠️ **Location Permission Denied / Disabled**: Please share your current city (e.g. *'My city is Jaipur'*) so I can display live weather & local travel options for you!\n\nAsk me anything like:\n* *'Show hotels under ₹5000 in Jaipur'*\n* *'Book me a bus from Delhi to Jaipur tomorrow evening'*"
-                }
-              ]);
-            }
-            setActiveCity('Delhi');
-          }
-        );
-      } else {
-        fallbackDefaultGreeting('Delhi');
-      }
-    };
-
-    const fallbackDefaultGreeting = (defaultCity) => {
-      setActiveCity(defaultCity);
-      if (!currentUser?.username) {
-        setMessages([
-          {
-            sender: 'bot',
-            text: `👋 Hi there! I'm **TravoAI**, your AI travel concierge powered by **Groq LLM** and **Vectra Vector Database**.\n\n📍 Default City: **${defaultCity}**\n\nAsk me anything like:\n* *'Need a hotel in ${defaultCity} under ₹5000'*\n* *'Suggest a holiday package for 4 people under ₹40,000'*`
-          }
-        ]);
-      }
-    };
-
-    initializeAppLocation();
-  }, []);
 
   const handleCategorySelect = async (category) => {
     setSelectedCategory(category);
@@ -294,7 +216,8 @@ export default function App() {
         text: data.text || "Here are the options I found for you:",
         intent: data.intent,
         type: data.type,
-        results: data.results || []
+        results: data.results || [],
+        sources: data.sources || []
       };
 
       setMessages((prev) => [...prev, botMsg]);
@@ -363,6 +286,7 @@ export default function App() {
       {/* Main Container Views */}
       <Suspense fallback={<ViewFallback />}>
       <div className="flex flex-1 overflow-hidden">
+        {currentView === 'flights' && <FlightsView onBackToHome={() => setCurrentView('home')} />}
         {currentView === 'home' && (
           <>
             {/* Left / Center Chat Column */}
@@ -416,6 +340,10 @@ export default function App() {
             bookings={bookings}
             onBackToHome={() => setCurrentView('home')}
           />
+        )}
+
+        {currentView === 'rag' && (
+          <RagExplorerView onBackToHome={() => setCurrentView('home')} />
         )}
 
         {currentView === 'admin' && (

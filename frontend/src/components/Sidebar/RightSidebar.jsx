@@ -44,7 +44,7 @@ export default function RightSidebar({ activeCity, onCityChange }) {
         </p>
         <div className="flex items-center justify-between text-[11px] pt-1">
           <span className="text-slate-400">LLM Provider:</span>
-          <span className="text-cyan-400 font-mono font-bold">Groq (Llama-3.1)</span>
+          <span className="text-cyan-400 font-mono font-bold">Configured provider</span>
         </div>
         <div className="flex items-center justify-between text-[11px]">
           <span className="text-slate-400">Vector Engine:</span>

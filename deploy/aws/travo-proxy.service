@@ -1,0 +1,17 @@
+[Unit]
+Description=TravoAI HTTPS proxy
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=/etc/travo/proxy.env
+Restart=always
+RestartSec=10
+ExecStartPre=-/usr/bin/docker rm -f travo-proxy
+ExecStart=/usr/bin/docker run --name travo-proxy --network host --read-only --cap-drop ALL --cap-add NET_BIND_SERVICE --security-opt no-new-privileges --pids-limit 128 --memory 192m --env DOMAIN_NAME=${DOMAIN_NAME} --mount type=bind,source=/opt/travo/deploy/aws/Caddyfile,target=/etc/caddy/Caddyfile,readonly --mount type=bind,source=/var/lib/travo/caddy-data,target=/data --mount type=bind,source=/var/lib/travo/caddy-config,target=/config --log-opt max-size=10m --log-opt max-file=3 caddy:2-alpine
+ExecStop=/usr/bin/docker stop -t 15 travo-proxy
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

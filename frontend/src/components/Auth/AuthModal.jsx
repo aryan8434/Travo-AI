@@ -6,17 +6,13 @@ import { backdrop, scaleIn } from '../../lib/motion';
 
 export default function AuthModal({ isOpen, onClose, onLoginSuccess }) {
   const [isLogin, setIsLogin] = useState(true);
-  const [username, setUsername] = useState('test1234');
-  const [password, setPassword] = useState('test12345');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState(null);
   const [successMsg, setSuccessMsg] = useState(null);
 
-  const handleQuickFillTestUser = () => {
-    setUsername('test1234');
-    setPassword('test12345');
-    setErrorMsg(null);
-  };
+
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -36,7 +32,7 @@ export default function AuthModal({ isOpen, onClose, onLoginSuccess }) {
       const data = res.data;
 
       if ((data.success || data.token) && data.token) {
-        const userObj = { ...(data.user || { username, walletBalance: 10000 }), token: data.token };
+        const userObj = { ...(data.user || { username, walletBalance: 0 }), token: data.token };
         axios.defaults.headers.common.Authorization = `Bearer ${data.token}`;
         setSuccessMsg(isLogin ? `👋 Welcome back, ${userObj.username}!` : '🎉 Account created successfully!');
 
@@ -81,11 +77,12 @@ export default function AuthModal({ isOpen, onClose, onLoginSuccess }) {
             </div>
             <div>
               <h3 className="text-base font-extrabold text-white">TravoAI Authentication</h3>
-              <p className="text-[11px] text-cyan-400">Save full chat history & wallet balance in MongoDB</p>
+              <p className="text-[11px] text-cyan-400">Keep your trips and wallet in one place</p>
             </div>
           </div>
           <button
             onClick={onClose}
+            aria-label="Close authentication"
             className="p-1.5 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white transition-all"
           >
             <X className="w-5 h-5" />
@@ -114,25 +111,6 @@ export default function AuthModal({ isOpen, onClose, onLoginSuccess }) {
             </button>
           </div>
 
-          {/* Preset Test Credentials Banner */}
-          <div className="p-3 bg-cyan-500/10 border border-cyan-500/20 rounded-2xl flex items-center justify-between text-xs">
-            <div className="space-y-0.5">
-              <span className="text-cyan-300 font-bold block flex items-center gap-1">
-                <Sparkles className="w-3.5 h-3.5 text-cyan-400" /> Default Test Account:
-              </span>
-              <span className="text-[11px] font-mono text-slate-300">
-                User: <strong className="text-white">test1234</strong> | Pass: <strong className="text-white">test12345</strong>
-              </span>
-            </div>
-            <button
-              type="button"
-              onClick={handleQuickFillTestUser}
-              className="px-2.5 py-1 bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 font-bold text-[11px] rounded-lg border border-cyan-500/30 transition-all shrink-0"
-            >
-              Auto Fill
-            </button>
-          </div>
-
           {errorMsg && (
             <div className="p-3 rounded-xl bg-rose-950/80 border border-rose-500/30 text-rose-300 text-xs font-medium flex items-center gap-2">
               <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
@@ -149,28 +127,32 @@ export default function AuthModal({ isOpen, onClose, onLoginSuccess }) {
 
           <form onSubmit={handleSubmit} className="space-y-4">
             <div className="space-y-1">
-              <label className="text-xs text-slate-400 font-semibold block">Username or Email</label>
+              <label htmlFor="auth-username" className="text-xs text-slate-400 font-semibold block">Username or Email</label>
               <div className="relative">
                 <User className="w-4 h-4 text-slate-400 absolute left-3.5 top-3" />
                 <input
+                  id="auth-username"
                   type="text"
+                  autoComplete="username"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
-                  placeholder="test1234"
+                  placeholder="Your username"
                   className="w-full bg-slate-900 text-white text-xs font-bold rounded-xl pl-9 pr-4 py-2.5 border border-slate-700 focus:outline-none focus:border-cyan-500"
                 />
               </div>
             </div>
 
             <div className="space-y-1">
-              <label className="text-xs text-slate-400 font-semibold block">Password (6+ characters)</label>
+              <label htmlFor="auth-password" className="text-xs text-slate-400 font-semibold block">Password (8+ characters)</label>
               <div className="relative">
                 <Lock className="w-4 h-4 text-slate-400 absolute left-3.5 top-3" />
                 <input
+                  id="auth-password"
                   type="password"
+                  autoComplete={isLogin ? 'current-password' : 'new-password'}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  placeholder="1234"
+                  placeholder="Your password"
                   className="w-full bg-slate-900 text-white text-xs font-bold rounded-xl pl-9 pr-4 py-2.5 border border-slate-700 focus:outline-none focus:border-cyan-500"
                 />
               </div>
@@ -190,7 +172,7 @@ export default function AuthModal({ isOpen, onClose, onLoginSuccess }) {
         {/* Footer */}
         <div className="p-3 bg-slate-900/90 border-t border-slate-800 text-center text-[10px] text-slate-400 flex items-center justify-center gap-1">
           <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
-          <span>MongoDB Persistent Chat History & Wallet Sync Activated</span>
+          <span>Your trips, payments and saved conversations in one account</span>
         </div>
           </motion.div>
         </motion.div>

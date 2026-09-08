@@ -25,7 +25,7 @@ export default function BookingsView({ bookings, onBackToHome }) {
           <h2 className="text-2xl font-extrabold text-white flex items-center gap-2">
             <BookmarkCheck className="w-6 h-6 text-emerald-400" /> My Bookings & Tickets
           </h2>
-          <p className="text-xs text-slate-400">View ticket details, PNR status, and scan QR codes for your confirmed trips</p>
+          <p className="text-xs text-slate-400">View payment receipts and supplier confirmation status for your trips</p>
         </div>
 
         {/* Successful vs Failed Tabs */}
@@ -39,7 +39,7 @@ export default function BookingsView({ bookings, onBackToHome }) {
             }`}
           >
             <CheckCircle2 className="w-4 h-4" />
-            <span>Confirmed Tickets ({successfulBookings.length})</span>
+            <span>Paid Bookings ({successfulBookings.length})</span>
           </button>
 
           <button

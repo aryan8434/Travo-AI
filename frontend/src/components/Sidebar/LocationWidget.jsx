@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { MapPin, Navigation, Compass, CheckCircle2 } from 'lucide-react';
 
 export default function LocationWidget({ activeCity, onCityChange }) {
@@ -18,7 +18,7 @@ export default function LocationWidget({ activeCity, onCityChange }) {
             const data = await response.json();
             const city = data.address?.city || data.address?.town || data.address?.state_district || 'Delhi';
             onCityChange(city);
-          } catch (err) {
+          } catch {
             onCityChange('Delhi');
           } finally {
             setIsDetecting(false);
@@ -34,11 +34,7 @@ export default function LocationWidget({ activeCity, onCityChange }) {
     }
   };
 
-  useEffect(() => {
-    if (!activeCity) {
-      detectLocation();
-    }
-  }, []);
+
 
   return (
     <div className="glass-card rounded-2xl p-4 border border-slate-800 space-y-3">
@@ -63,7 +59,7 @@ export default function LocationWidget({ activeCity, onCityChange }) {
           </div>
           <div>
             <div className="text-sm font-bold text-white">{activeCity || 'Delhi'}</div>
-            <span className="text-[10px] text-slate-400">Detected via HTML5 Geolocation</span>
+            <span className="text-[10px] text-slate-400">Selected travel city</span>
           </div>
         </div>
         <CheckCircle2 className="w-4 h-4 text-emerald-400" />

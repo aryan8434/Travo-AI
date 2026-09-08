@@ -3,8 +3,9 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
-const groq = new Groq({
+const groq = process.env.GROQ_API_KEY ? new Groq({
   apiKey: process.env.GROQ_API_KEY,
-});
+  timeout: 12000, maxRetries: 0,
+}) : null;
 
 export default groq;

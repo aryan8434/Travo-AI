@@ -160,3 +160,7 @@
     scroll-behavior: auto !important;
   }
 }
+
+.guide-prose h1,.guide-prose h2 {font-weight:700; color:#e2e8f0; margin:1.5rem 0 .5rem;}
+.guide-prose p {margin-bottom:1rem;}
+@media (prefers-reduced-motion: reduce) { *,*::before,*::after { animation-duration:0.01ms !important; animation-iteration-count:1 !important; transition-duration:0.01ms !important; scroll-behavior:auto !important; } }

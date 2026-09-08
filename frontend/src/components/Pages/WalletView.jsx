@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Wallet, PlusCircle, CreditCard, ArrowLeft, ShieldCheck, Sparkles, CheckCircle2, AlertCircle } from 'lucide-react';
 import { initializePayment } from '../../utils/razorpay';
-import { getWalletBalance, addWalletBalance } from '../../utils/storage';
+import { getWalletBalance } from '../../utils/storage';
 import InvoiceCard from '../Payment/InvoiceCard';
 
 export default function WalletView({ onBackToHome, onBalanceUpdate }) {
@@ -32,12 +32,11 @@ export default function WalletView({ onBackToHome, onBalanceUpdate }) {
     initializePayment(
       walletItem,
       (result) => {
-        // Only ₹1 was charged via Razorpay — credit the full requested amount.
-        const newBal = addWalletBalance(amount);
+        const newBal = result.wallet;
         setBalance(newBal);
         if (onBalanceUpdate) onBalanceUpdate(newBal);
         setInvoice(result?.invoice || null);
-        setSuccessMsg(`🎉 ₹${amount.toLocaleString('en-IN')} credited to your TravoAI Wallet. Only ₹1 was charged via Razorpay — invoice raised for the full amount.`);
+        setSuccessMsg(`🎉 ₹${amount.toLocaleString('en-IN')} credited to your TravoAI Wallet. The full amount was verified by Razorpay.`);
         setLoading(false);
       },
       (err) => {
@@ -61,7 +60,7 @@ export default function WalletView({ onBackToHome, onBalanceUpdate }) {
           <h2 className="text-2xl font-extrabold text-white flex items-center gap-2">
             <Wallet className="w-6 h-6 text-cyan-400" /> TravoAI Digital Wallet
           </h2>
-          <p className="text-xs text-slate-400">Add any amount — Razorpay charges a flat ₹1 confirmation fee, and the full amount is credited to your wallet with a GST invoice.</p>
+          <p className="text-xs text-slate-400">Pay in rupees. Your wallet is credited only after the full payment is verified.</p>
         </div>
       </div>
 
@@ -107,7 +106,6 @@ export default function WalletView({ onBackToHome, onBalanceUpdate }) {
             <span className="flex items-center gap-1.5 text-emerald-400 font-semibold">
               <ShieldCheck className="w-4 h-4" /> Razorpay Standard Checkout
             </span>
-            <span className="font-mono text-[11px]">User ID: \`usr_84301\`</span>
           </div>
         </div>
 
@@ -154,9 +152,9 @@ export default function WalletView({ onBackToHome, onBalanceUpdate }) {
             className="w-full py-3.5 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-extrabold text-sm rounded-2xl shadow-xl shadow-cyan-500/20 flex items-center justify-center gap-2 transition-all disabled:opacity-50"
           >
             <CreditCard className="w-4 h-4" />
-            <span>{loading ? 'Opening Razorpay…' : `Credit ₹${Number(customAmount || 0).toLocaleString('en-IN')} · pay ₹1`}</span>
+            <span>{loading ? 'Opening Razorpay…' : `Credit ₹${Number(customAmount || 0).toLocaleString('en-IN')} · pay in full`}</span>
           </button>
-          <p className="text-[10px] text-slate-500 text-center">You pay ₹1 now. ₹{Number(customAmount || 0).toLocaleString('en-IN')} is added to your wallet.</p>
+          <p className="text-[10px] text-slate-500 text-center">The full selected amount is charged. ₹{Number(customAmount || 0).toLocaleString('en-IN')} is added to your wallet.</p>
         </div>
       </div>
     </div>

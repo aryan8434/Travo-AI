@@ -6,7 +6,7 @@
   { "city": "Chennai", "name": "Chennai International Airport", "iata": "MAA", "lat": 12.9941, "lon": 80.1709, "aliases": ["madras"] },
   { "city": "Kolkata", "name": "Netaji Subhas Chandra Bose International Airport", "iata": "CCU", "lat": 22.6547, "lon": 88.4467, "aliases": ["calcutta"] },
   { "city": "Kochi", "name": "Cochin International Airport", "iata": "COK", "lat": 10.1520, "lon": 76.4019, "aliases": ["cochin", "ernakulam"] },
-  { "city": "Goa", "name": "Dabolim / Manohar International Airport", "iata": "GOI", "lat": 15.3808, "lon": 73.8314, "aliases": ["panaji", "panjim", "mopa", "dabolim"] },
+  { "city": "Goa", "name": "Goa International Airport (Dabolim)", "iata": "GOI", "lat": 15.3808, "lon": 73.8314, "aliases": ["panaji", "panjim", "dabolim"] },
   { "city": "Pune", "name": "Pune International Airport", "iata": "PNQ", "lat": 18.5822, "lon": 73.9197, "aliases": ["poona"] },
   { "city": "Ahmedabad", "name": "Sardar Vallabhbhai Patel International Airport", "iata": "AMD", "lat": 23.0772, "lon": 72.6347, "aliases": ["amdavad", "gandhinagar"] },
   { "city": "Jaipur", "name": "Jaipur International Airport", "iata": "JAI", "lat": 26.8242, "lon": 75.8122, "aliases": ["pink city"] },

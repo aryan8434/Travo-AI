@@ -8,7 +8,13 @@
     "dev": "nodemon --ignore vectra_index/ --ignore data/ index.js",
     "generate:packages": "node scripts/generatePackages.mjs",
     "reindex": "node scripts/reindex.mjs",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --test --test-concurrency=1 tests/*.test.mjs",
+    "ingest:guide": "node scripts/ingestGuide.mjs",
+    "validate:packages": "node scripts/validatePackages.mjs",
+    "build": "npm --prefix frontend run build",
+    "lint": "eslint frontend/src",
+    "content:jobs": "node scripts/contentJobs.mjs",
+    "check:production": "node scripts/checkProduction.mjs"
   },
   "keywords": [],
   "author": "Aryan",
@@ -29,5 +35,17 @@
     "mongoose": "^9.1.5",
     "razorpay": "^2.9.8",
     "vectra": "^0.15.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.10.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "eslint-plugin-react-refresh": "^0.5.6",
+    "globals": "^17.12.0",
+    "mongodb-memory-server": "^11.2.0",
+    "supertest": "^7.2.2"
+  },
+  "engines": {
+    "node": ">=22.12.0"
   }
 }

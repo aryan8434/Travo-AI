@@ -1,0 +1,16 @@
+[Unit]
+Description=TravoAI production application
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Restart=always
+RestartSec=10
+ExecStartPre=-/usr/bin/docker rm -f travo-app
+ExecStart=/usr/bin/docker run --name travo-app --init --network host --read-only --cap-drop ALL --security-opt no-new-privileges --pids-limit 256 --memory 1200m --tmpfs /tmp:rw,noexec,nosuid,size=64m --env-file /etc/travo/app.env --mount type=bind,source=/var/lib/travo/index,target=/app/vectra_index --log-opt max-size=10m --log-opt max-file=3 travo-app:current
+ExecStop=/usr/bin/docker stop -t 30 travo-app
+TimeoutStopSec=45
+
+[Install]
+WantedBy=multi-user.target

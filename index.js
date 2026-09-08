@@ -5,6 +5,8 @@ import helmet from "helmet";
 import compression from "compression";
 import rateLimit from "express-rate-limit";
 import { askLLM } from "./llm.js";
+import { answerPackageQuestion } from "./utils/packageAnswer.js";
+import { parseTravelPreferences } from "./utils/travelPreferences.js";
 import { connectDB } from "./db.js";
 import { saveMessage } from "./utils/saveChat.js";
 import { getChatHistory } from "./utils/getChatHistory.js";
@@ -15,7 +17,7 @@ import {
   saveSlots,
   mergeIntent,
 } from "./utils/sessionContext.js";
-import authRoutes, { seedTestUser } from "./routes/auth.js";
+import authRoutes from "./routes/auth.js";
 import userRoutes from "./routes/user.js";
 import auth from "./utils/auth.js";
 import adminAuth from "./utils/adminAuth.js";
@@ -27,10 +29,18 @@ import {
   retrievePackages,
   loadAllPackages,
   syncVectraIndex,
+  startPackageWatcher,
   budgetTier,
   resolvePackageLocation,
   packageLocationOptions,
 } from "./utils/ragEngine.js";
+import {
+  searchChunks,
+  listChunks,
+  getChunkById,
+  ragStats,
+  chunkFacets,
+} from "./utils/ragChunks.js";
 import {
   buildFlights,
   listAirports,
@@ -40,9 +50,12 @@ import {
   findAirportsInText,
 } from "./utils/flightEngine.js";
 import { fileURLToPath } from "url";
-import Razorpay from "razorpay";
+import { createPaymentRouter, requireDatabase } from "./routes/payments.js";
+import { attachQuote } from "./utils/checkout.js";
+import { chatIdentity } from "./utils/chatIdentity.js";
 import crypto from "crypto";
-import { buildInvoice, TOKEN_PAYMENT_PAISE, TOKEN_PAYMENT_RUPEES } from "./utils/invoice.js";
+import mongoose from 'mongoose';
+import { assertProductionConfig } from './utils/productionConfig.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -50,41 +63,25 @@ const __dirname = path.dirname(__filename);
 /* =========================================================
    BOOT-TIME CONFIG GUARDS
 ========================================================= */
-if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 16) {
+if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) {
   console.error(
-    "❌ JWT_SECRET is missing or too short (min 16 chars). Auth endpoints will fail. Set it in .env",
+    "❌ JWT_SECRET is missing or too short (min 32 chars). Auth endpoints will fail. Set it in .env",
   );
 }
-
-const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID;
-const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET;
-const paymentsConfigured = Boolean(RAZORPAY_KEY_ID && RAZORPAY_KEY_SECRET);
-
-// PAYMENTS_MODE: "live" (default when keys present) runs the full Razorpay flow.
-// "test" (default when keys absent) completes the ₹1 confirmation without a real
-// gateway call — clearly labelled, still raises the full invoice. Every charge
-// is only ₹1 either way.
-const PAYMENTS_MODE =
-  (process.env.PAYMENTS_MODE || (paymentsConfigured ? "live" : "test")).toLowerCase() === "test"
-    ? "test"
-    : "live";
-
-if (PAYMENTS_MODE === "test") {
-  console.warn("⚠️ PAYMENTS_MODE=test — ₹1 confirmations complete without a real gateway charge.");
-} else if (!paymentsConfigured) {
-  console.warn("⚠️ Payments in live mode but RAZORPAY keys are not set — endpoints return 503.");
-}
-
-const razorpayInstance = paymentsConfigured
-  ? new Razorpay({ key_id: RAZORPAY_KEY_ID, key_secret: RAZORPAY_KEY_SECRET })
-  : null;
 
 /* =========================================================
    APP + MIDDLEWARE
 ========================================================= */
 const app = express();
-app.set("trust proxy", 1);
-app.use(helmet({ contentSecurityPolicy: false }));
+app.set("trust proxy", process.env.TRUST_PROXY || false);
+app.use(helmet({ contentSecurityPolicy: { directives: {
+    defaultSrc: ["'self'"], scriptSrc: ["'self'", 'https://checkout.razorpay.com'],
+    styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+    fontSrc: ["'self'", 'https://fonts.gstatic.com', 'data:'],
+    imgSrc: ["'self'", 'data:', 'https:'],
+    connectSrc: ["'self'", 'https://*.razorpay.com', 'https://nominatim.openstreetmap.org', 'https://api.open-meteo.com', 'https://ipapi.co'],
+    frameSrc: ['https://*.razorpay.com'], objectSrc: ["'none'"], upgradeInsecureRequests: process.env.NODE_ENV === 'production' ? [] : null,
+  } } }));
 app.use(compression());
 
 const corsOrigins = (process.env.CORS_ORIGINS || "")
@@ -113,7 +110,17 @@ app.use(
   }),
 );
 
+const paymentsRouter = createPaymentRouter();
+app.use('/api', (req, res, next) => {
+  if (req.path === '/payments/webhook') return paymentsRouter(req, res, next);
+  next();
+});
 app.use(express.json({ limit: "1mb" }));
+app.get('/health/live', (req, res) => res.json({ status: 'ok' }));
+app.get('/health/ready', (req, res) => {
+  const ready = mongoose.connection.readyState === 1;
+  res.status(ready ? 200 : 503).json({ status: ready ? 'ready' : 'unavailable' });
+});
 
 /* Rate limiters */
 const authLimiter = rateLimit({
@@ -136,8 +143,13 @@ const chatLimiter = rateLimit({
 });
 const paymentLimiter = rateLimit({ windowMs: 60 * 60 * 1000, max: 30, standardHeaders: true, legacyHeaders: false });
 
-app.use("/auth", authLimiter, authRoutes);
-app.use("/user", userRoutes);
+app.use("/auth", authLimiter, requireDatabase, authRoutes);
+app.use("/user", paymentLimiter, userRoutes);
+app.use(["/api/create-order", "/api/verify-payment"], paymentLimiter);
+app.use("/api", (req, res, next) => {
+  if (["/create-order", "/verify-payment"].includes(req.path)) return paymentsRouter(req, res, next);
+  next();
+});
 
 /* =========================================================
    MOCK DATA HELPERS (buses / hotels)
@@ -238,10 +250,11 @@ function isLocationQuery(message) {
 /* =========================================================
    CHAT ENDPOINT
 ========================================================= */
-app.post("/chat", chatLimiter, async (req, res) => {
+app.post("/chat", chatLimiter, chatIdentity, async (req, res) => {
   try {
-    const { message, policeCalled = false, sessionId, userCity } = req.body;
+    const { message, policeCalled = false, userCity } = req.body;
 
+    const sessionId = req.chatSessionId;
     if (!sessionId) {
       return res.status(400).json({ error: true, text: "Session ID is required" });
     }
@@ -287,6 +300,7 @@ app.post("/chat", chatLimiter, async (req, res) => {
     }
 
     const sendResponse = async (payload) => {
+      if (Array.isArray(payload.results)) payload.results = payload.results.map(item => attachQuote(item, payload.type));
       if (payload?.text) await saveMessage(sessionId, "llm", payload.text);
       return res.json(payload);
     };
@@ -302,95 +316,26 @@ app.post("/chat", chatLimiter, async (req, res) => {
       ["package", "trip", "vacation", "tour", "holiday", "itinerary"].some((k) => lower.includes(k));
 
     if (wantsPackage) {
-      // A package location must be explicitly chosen by the user — the
-      // geolocated activeCity does NOT count. Try what they said this turn,
-      // then whatever we remembered from an earlier turn of this flow.
-      const locHint =
-        intent.city ||
-        intent.to ||
-        intent.cityCandidate ||
-        previousSlots.packageLocation ||
-        null;
-      const loc = locHint ? resolvePackageLocation(locHint) : null;
-
-      if (!loc) {
-        // Ask which state / destination — list only what we actually stock.
-        const { states, destinations } = packageLocationOptions();
-        const topStates = states.slice(0, 14).map((s) => `${s.name} (${s.count})`);
-        const popular = destinations.slice(0, 12).map((d) => d.name);
-
-        const notStocked =
-          locHint && intent.awaitingPackageLocation
-            ? `I don't have holiday packages for **${locHint}** yet. `
-            : "";
-
-        await saveSlots(sessionId, {
-          ...intent,
-          intent: "trip_plan",
-          awaitingPackageLocation: true,
-          packageLocation: null,
-        });
-
-        return sendResponse({
-          intent: "trip_plan",
-          type: "package",
-          text:
-            `🌴 ${notStocked}Which **destination or state** would you like a holiday package for?\n\n` +
-            `**States we cover:** ${topStates.join(", ")}\n\n` +
-            `**Popular spots:** ${popular.join(", ")}\n\n` +
-            `_Reply with one — e.g. "Rajasthan" or "Goa" — and I'll show only those packages._`,
-          results: [],
-          activeCity,
-        });
-      }
-
-      // Remember the resolved location so budget/tier follow-ups stay scoped.
-      await saveSlots(sessionId, {
-        ...intent,
-        intent: "trip_plan",
-        awaitingPackageLocation: false,
-        packageLocation: loc.value,
-      });
-
-      const hasBudgetPref = Boolean(
-        intent.budgetTier || intent.budgetMax || intent.maxPrice || intent.budget || intent.budgetMin,
-      );
-
-      const ragData = await retrievePackages(
-        intent.awaitingPackageLocation ? loc.value : message,
-        {
-          budget: intent.budget || intent.maxPrice,
-          budgetMin: intent.budgetMin ?? null,
-          budgetMax: intent.budgetMax ?? intent.maxPrice ?? null,
-          budgetTier: intent.budgetTier || null,
-          city: loc.value,
-          strictCity: true,
-          softBudget: true, // location is the hard filter; budget only ranks
-        },
-        16,
-      );
-
-      const scopeLabel =
-        loc.kind === "state" ? `${loc.value} state`
-        : loc.kind === "country" ? loc.value
-        : loc.value;
-
-      const prefNote = hasBudgetPref
-        ? ` — best matches for your budget first`
-        : ``;
-
-      const packageMessage = ragData.matches.length
-        ? `🌴 Holiday packages in **${scopeLabel}** (${ragData.matches.length})${prefNote}:`
-        : `🌴 I don't have any packages for **${scopeLabel}** right now. Pick another destination or state.`;
-
+      const loc = resolvePackageLocation(message) || resolvePackageLocation(intent.city) || resolvePackageLocation(intent.to) || resolvePackageLocation(previousSlots.packageLocation);
+      const explicit = parseTravelPreferences(message);
+      const filters = {
+        budgetMin: explicit.budgetMin ?? intent.budgetMin ?? null,
+        budgetMax: explicit.budgetMax ?? intent.budgetMax ?? intent.maxPrice ?? intent.budget ?? null,
+        budgetTier: explicit.budgetTier || (previousSlots.intent === 'trip_plan' ? previousSlots.budgetTier : null),
+        people: explicit.people ?? (previousSlots.intent === 'trip_plan' ? previousSlots.people : null),
+        city: loc?.value || null,
+      };
+      await saveSlots(sessionId, { ...intent, ...filters, intent: 'trip_plan', packageLocation: loc?.value, awaitingPackageLocation: false });
+      const rag = await retrievePackages(message, filters, 8);
+      const question = /\?|what|which|include|meal|cancellation|how|tell me|best time/i.test(message);
+      const response = question && rag.matches.length ? await answerPackageQuestion(message, filters) : null;
       return sendResponse({
-        intent: "trip_plan",
-        type: "package",
-        text: packageMessage,
-        results: ragData.matches,
-        vectorDbUsed: ragData.vectorDbUsed,
-        packageLocation: loc.value,
-        activeCity,
+        intent: 'trip_plan', type: 'package',
+        text: response?.answer || (rag.matches.length
+          ? 'Holiday packages' + (loc ? ' in **' + loc.value + '**' : '') + (filters.budgetMax ? ' within **₹' + Number(filters.budgetMax).toLocaleString('en-IN') + '**' : '') + '. Prices cover the stated number of guests; check inclusions for transport.'
+          : 'No packages match this destination, tier and budget. Try changing one of these filters.'),
+        results: rag.matches.map(({ detailed_guide, full_guide, ...p }) => p),
+        sources: response?.sources || [], vectorDbUsed: rag.vectorDbUsed, activeCity,
       });
     }
 
@@ -410,14 +355,14 @@ app.post("/chat", chatLimiter, async (req, res) => {
       let hotels = await fetchRealHotels(cityToSearch);
       hotels =
         hotels.length === 0
-          ? mockHotels(intent.budget, cityToSearch)
+          ? (process.env.NODE_ENV === 'production' ? [] : mockHotels(intent.budget, cityToSearch))
           : hotels.filter((h) => h.price <= intent.budget).slice(0, 3);
 
       if (hotels.length === 0) {
         return sendResponse({
           intent: "hotel_search",
           type: "hotel",
-          text: `😕 No hotels found under ₹${intent.budget} in ${cityToSearch}. Please try a higher budget.`,
+          text: `No verified hotel rates are available under ₹${intent.budget} in ${cityToSearch} right now.`,
           results: [],
           activeCity: cityToSearch,
         });
@@ -434,6 +379,7 @@ app.post("/chat", chatLimiter, async (req, res) => {
 
     /* ---------- BUS SEARCH ---------- */
     if (intent.intent === "bus") {
+      if (process.env.NODE_ENV === 'production') return sendResponse({ intent: 'bus', type: 'bus', text: 'Live bus inventory is not connected yet. No reservable bus seats are available through this app.', results: [], activeCity });
       const fromCity = intent.from || activeCity || "Delhi";
       const toCity = intent.to;
       if (!toCity) {
@@ -672,9 +618,15 @@ app.post("/chat", chatLimiter, async (req, res) => {
 /* =========================================================
    PACKAGE / RAG QUERY ENDPOINTS
 ========================================================= */
-app.get("/api/packages", async (req, res) => {
+app.get("/api/packages", chatLimiter, async (req, res) => {
   try {
     const { query = "", budget, budgetMin, budgetMax, city, people, category, tier } = req.query;
+    if ([query, city, category, tier].some(v => v != null && (typeof v !== 'string' || v.length > 2000))) return res.status(400).json({ error: 'Invalid text filter' });
+    if ([budget, budgetMin, budgetMax, people].some(v => v != null && (!Number.isFinite(Number(v)) || Number(v) < 0))) return res.status(400).json({ error: 'Invalid numeric filter' });
+    if (tier && tier !== 'ALL' && !['economical', 'premium', 'luxury'].includes(tier)) return res.status(400).json({ error: 'Invalid tier' });
+    if (budgetMin && budgetMax && Number(budgetMin) > Number(budgetMax)) return res.status(400).json({ error: 'Minimum budget exceeds maximum budget' });
+    const page = Math.max(1, Math.min(100, Math.floor(Number(req.query.page) || 1)));
+    const pageSize = 24;
     const ragData = await retrievePackages(
       query,
       {
@@ -686,22 +638,124 @@ app.get("/api/packages", async (req, res) => {
         people: people ? Number(people) : null,
         category,
       },
-      24,
+      page * pageSize,
     );
-    res.json({ success: true, packages: ragData.matches, vectorDbUsed: ragData.vectorDbUsed });
+    res.json({ success: true, packages: ragData.matches.slice((page - 1) * pageSize).map(({ detailed_guide, full_guide, ...pkg }) => pkg), total: ragData.total, page, hasMore: page * pageSize < ragData.total, vectorDbUsed: ragData.vectorDbUsed });
   } catch (err) {
-    res.status(500).json({ error: true, message: err.message });
+    res.status(500).json({ error: true, message: "The request could not be completed" });
   }
 });
 
+app.get('/api/packages/:id', chatLimiter, (req, res) => {
+  const pkg = loadAllPackages().find(p => p.package_id === req.params.id);
+  if (!pkg) return res.status(404).json({ error: 'Package not found' });
+  res.json({ success: true, package: pkg });
+});
+app.post('/api/packages/ask', chatLimiter, async (req, res) => {
+  const { query, package_id, budgetMax, tier } = req.body || {};
+  if (typeof query !== 'string' || !query.trim() || query.length > 2000 || (package_id != null && typeof package_id !== 'string') || (budgetMax != null && (!Number.isFinite(budgetMax) || budgetMax < 0)) || (tier != null && !['economical', 'premium', 'luxury'].includes(tier))) return res.status(400).json({ error: 'Invalid package question or filters' });
+  const filters = { packageId: package_id };
+  if (budgetMax != null) filters.budgetMax = budgetMax;
+  if (tier) filters.budgetTier = tier;
+  res.json({ success: true, ...(await answerPackageQuestion(query, filters)) });
+});
+
+app.get('/api/flights', chatLimiter, (req, res) => {
+  if (typeof req.query.from !== 'string' || typeof req.query.to !== 'string' || req.query.from.length > 80 || req.query.to.length > 80) return res.status(400).json({ error: 'Origin and destination are required' });
+  const result = buildFlights(req.query.from, req.query.to, 6);
+  if (!result.ok) return res.status(400).json({ error: result.error });
+  res.json({ ...result, flights: result.flights.map(f => attachQuote(f, 'flight')) });
+});
+app.get('/api/weather', chatLimiter, async (req, res) => {
+  if (typeof req.query.city !== 'string' || req.query.city.length > 120) return res.status(400).json({ error: 'City is required' });
+  res.setHeader('Cache-Control', 'public, max-age=300');
+  res.json({ weather: await fetchWeather(req.query.city) });
+});
 app.get("/api/airports", (req, res) => {
   res.json({ success: true, count: listAirports().length, airports: listAirports() });
 });
 
 /* =========================================================
+   RAG EXPLORER API — inspect the retrieval layer itself
+========================================================= */
+
+// Index-wide statistics (documents, chunks, embedding model, chunking config)
+app.get("/api/rag/stats", async (req, res) => {
+  try {
+    res.json({ success: true, ...(await ragStats()) });
+  } catch (err) {
+    res.status(500).json({ error: true, message: "The request could not be completed" });
+  }
+});
+
+// Distinct facet values for filter dropdowns
+app.get("/api/rag/facets", async (req, res) => {
+  try {
+    res.json({ success: true, ...(await chunkFacets()) });
+  } catch (err) {
+    res.status(500).json({ error: true, message: "The request could not be completed" });
+  }
+});
+
+// Browse / keyword-filter the chunk store (no vector query)
+app.get("/api/rag/chunks", async (req, res) => {
+  try {
+    const { page, limit, q, package_id, kind, section } = req.query;
+    const data = await listChunks({
+      page: Math.max(1, Math.floor(Number(page) || 1)),
+      limit: Math.max(1, Math.min(100, Math.floor(Number(limit) || 25))),
+      q: q || "",
+      packageId: package_id || null,
+      kind: kind || null,
+      section: section || null,
+    });
+    res.json({ success: true, ...data });
+  } catch (err) {
+    res.status(500).json({ error: true, message: "The request could not be completed" });
+  }
+});
+
+// One chunk + its nearest neighbours in embedding space
+app.get("/api/rag/chunk", async (req, res) => {
+  try {
+    const id = String(req.query.id || "");
+    if (!id) return res.status(400).json({ error: true, message: "id is required" });
+    const data = await getChunkById(id, {
+      neighbours: Math.min(10, Number(req.query.neighbours) || 5),
+    });
+    if (!data) return res.status(404).json({ error: true, message: "Chunk not found" });
+    res.json({ success: true, ...data });
+  } catch (err) {
+    res.status(500).json({ error: true, message: "The request could not be completed" });
+  }
+});
+
+// Semantic + BM25 hybrid search over chunks — the core RAG demo
+app.post("/api/rag/search", chatLimiter, async (req, res) => {
+  try {
+    const { query, topK, package_id, kind, section, minScore, hybrid } = req.body || {};
+    if (typeof query !== "string" || !query.trim() || query.length > 2000) {
+      return res.status(400).json({ error: true, message: "query is required" });
+    }
+    const data = await searchChunks(query.trim(), {
+      topK: Math.max(1, Math.min(25, Math.floor(Number(topK) || 10))),
+      packageId: package_id || null,
+      kind: kind || null,
+      section: section || null,
+      minScore: Number(minScore) || 0,
+      hybrid: hybrid !== false,
+    });
+    res.json({ success: true, ...data });
+  } catch (err) {
+    console.error("RAG search error:", err);
+    res.status(500).json({ error: true, message: "The request could not be completed" });
+  }
+});
+
+/* =========================================================
    ADMIN — RAG ENGINE CONTROL (protected)
 ========================================================= */
-app.post("/api/admin/reindex", adminAuth, async (req, res) => {
+app.post("/api/admin/reindex", authLimiter, adminAuth, async (req, res) => {
   try {
     await syncVectraIndex({ force: req.query.force === "1" });
     const pkgs = loadAllPackages();
@@ -711,7 +765,7 @@ app.post("/api/admin/reindex", adminAuth, async (req, res) => {
       count: pkgs.length,
     });
   } catch (err) {
-    res.status(500).json({ error: true, message: err.message });
+    res.status(500).json({ error: true, message: "The request could not be completed" });
   }
 });
 
@@ -729,212 +783,36 @@ app.get("/api/admin/chunks", adminAuth, async (req, res) => {
       chunks: pkgs.slice(0, 15),
     });
   } catch (err) {
-    res.status(500).json({ error: true, message: err.message });
-  }
-});
-
-/* =========================================================
-   RAZORPAY — flat ₹1 confirmation charge, strict verification.
-   PAYMENTS_MODE=test completes the ₹1 step without a real gateway call.
-========================================================= */
-function requirePayments(req, res, next) {
-  if (PAYMENTS_MODE === "live" && !paymentsConfigured) {
-    return res.status(503).json({
-      error: true,
-      message: "Payments are not configured on this server.",
-    });
-  }
-  next();
-}
-
-const TEST_ORDER_PREFIX = "order_tmtest_";
-
-// STEP 1: Create the ₹1 confirmation order.
-// The full value travels in `notes.nominal_amount` for the invoice later.
-app.post("/api/create-order", paymentLimiter, requirePayments, async (req, res) => {
-  const nominalAmount = Math.max(0, Math.round(Number(req.body?.nominalAmount ?? req.body?.amount) || 0));
-  const description = String(req.body?.description || "TravoAI booking").slice(0, 120);
-  const kind = req.body?.kind === "wallet" ? "wallet" : "booking";
-
-  // Test mode — no gateway round-trip.
-  if (PAYMENTS_MODE === "test") {
-    const orderId = `${TEST_ORDER_PREFIX}${Date.now()}_${crypto.randomBytes(3).toString("hex")}`;
-    return res.json({
-      success: true,
-      test_mode: true,
-      order_id: orderId,
-      amount: TOKEN_PAYMENT_PAISE,
-      token_charge_rupees: TOKEN_PAYMENT_RUPEES,
-      nominal_amount: nominalAmount,
-      currency: "INR",
-      key_id: RAZORPAY_KEY_ID || "rzp_test_unset",
-      _notes: { nominal_amount: nominalAmount, description, kind },
-    });
-  }
-
-  try {
-    const order = await razorpayInstance.orders.create({
-      amount: TOKEN_PAYMENT_PAISE, // ₹1 always
-      currency: "INR",
-      receipt: String(req.body?.receipt || `rcpt_${Date.now()}`).slice(0, 40),
-      notes: {
-        nominal_amount: String(nominalAmount),
-        description,
-        kind,
-      },
-    });
-
-    console.log(`✅ Razorpay order ${order.id} — ₹${TOKEN_PAYMENT_RUPEES} token charge (nominal ₹${nominalAmount})`);
-    return res.json({
-      success: true,
-      order_id: order.id,
-      amount: order.amount, // 100 paise
-      token_charge_rupees: TOKEN_PAYMENT_RUPEES,
-      nominal_amount: nominalAmount,
-      currency: order.currency,
-      key_id: RAZORPAY_KEY_ID,
-    });
-  } catch (err) {
-    const rzpMsg = err?.error?.description || err?.message || String(err);
-    console.error("Razorpay order creation failed:", err?.statusCode || "", rzpMsg);
-    const authFail = err?.statusCode === 401 || /authentication/i.test(rzpMsg);
-    return res.status(502).json({
-      error: true,
-      message: authFail
-        ? "Payment gateway rejected the API keys. Set valid RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET (test keys are fine)."
-        : "Could not create payment order. Please try again.",
-    });
-  }
-});
-
-// STEP 2: Verify signature + confirm the payment really was captured.
-app.post("/api/verify-payment", paymentLimiter, requirePayments, async (req, res) => {
-  try {
-    const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body || {};
-
-    // Test mode — accept the ₹1 confirmation, raise the full invoice, label it.
-    if (PAYMENTS_MODE === "test" && String(razorpay_order_id || "").startsWith(TEST_ORDER_PREFIX)) {
-      const notes = req.body?.notes || {};
-      const nominalAmount = Math.round(Number(notes.nominal_amount) || Number(req.body?.nominalAmount) || 0);
-      const invoice = buildInvoice({
-        nominalAmount,
-        description: notes.description || req.body?.description || "TravoAI booking",
-        kind: notes.kind || req.body?.kind || "booking",
-        paymentId: razorpay_payment_id || `pay_test_${Date.now()}`,
-        orderId: razorpay_order_id,
-        customer: req.body?.customer || "Guest",
-      });
-      invoice.gateway = "TravoAI Test Mode";
-      invoice.settlement_note = `Test mode — no real gateway charge. Invoice raised for the full ${invoice.nominal_amount_display}.`;
-      console.log(`✅ Test payment confirmed · invoice ${invoice.invoice_no} for ₹${nominalAmount}`);
-      return res.json({
-        success: true,
-        test_mode: true,
-        message: "Test payment confirmed",
-        payment_id: invoice.payment_id,
-        order_id: razorpay_order_id,
-        amount: TOKEN_PAYMENT_PAISE,
-        nominal_amount: nominalAmount,
-        invoice,
-      });
-    }
-
-    if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
-      return res.status(400).json({
-        success: false,
-        message: "razorpay_order_id, razorpay_payment_id and razorpay_signature are required",
-      });
-    }
-
-    const expected = crypto
-      .createHmac("sha256", RAZORPAY_KEY_SECRET)
-      .update(`${razorpay_order_id}|${razorpay_payment_id}`)
-      .digest("hex");
-
-    const a = Buffer.from(expected);
-    const b = Buffer.from(String(razorpay_signature));
-    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
-      console.warn("❌ Razorpay signature mismatch");
-      return res.status(400).json({ success: false, message: "Invalid signature" });
-    }
-
-    // Cross-check with Razorpay: payment must belong to the order, be paid,
-    // and be exactly the ₹1 token charge.
-    const payment = await razorpayInstance.payments.fetch(razorpay_payment_id);
-    if (
-      !payment ||
-      payment.order_id !== razorpay_order_id ||
-      !["captured", "authorized"].includes(payment.status)
-    ) {
-      return res.status(400).json({ success: false, message: "Payment not captured for this order" });
-    }
-    if (Number(payment.amount) !== TOKEN_PAYMENT_PAISE) {
-      return res.status(400).json({ success: false, message: "Unexpected payment amount" });
-    }
-
-    // Recover the nominal (full) value from the order to raise the invoice.
-    let nominalAmount = 0;
-    let description = "TravoAI booking";
-    let kind = "booking";
-    try {
-      const order = await razorpayInstance.orders.fetch(razorpay_order_id);
-      nominalAmount = Math.round(Number(order?.notes?.nominal_amount) || 0);
-      description = order?.notes?.description || description;
-      kind = order?.notes?.kind || kind;
-    } catch {
-      /* order notes are best-effort */
-    }
-
-    const invoice = buildInvoice({
-      nominalAmount,
-      description,
-      kind,
-      paymentId: razorpay_payment_id,
-      orderId: razorpay_order_id,
-      customer: req.body?.customer || "Guest",
-    });
-
-    console.log(`✅ Payment verified: ${razorpay_payment_id} (₹${payment.amount / 100} token · invoice ${invoice.invoice_no} for ₹${nominalAmount})`);
-    return res.json({
-      success: true,
-      message: "Payment verified successfully",
-      payment_id: razorpay_payment_id,
-      order_id: razorpay_order_id,
-      amount: payment.amount,
-      nominal_amount: nominalAmount,
-      invoice,
-    });
-  } catch (err) {
-    console.error("Payment verification error:", err?.message || err);
-    return res.status(500).json({ success: false, message: "Server error during verification" });
+    res.status(500).json({ error: true, message: "The request could not be completed" });
   }
 });
 
 /* =========================================================
    USER PERSISTENT CHAT HISTORY (auth-scoped, no IDOR)
 ========================================================= */
-app.get("/api/chat/user-history", auth, async (req, res) => {
+app.get("/api/chat/user-history", auth, requireDatabase, async (req, res) => {
   try {
     const userChat = await UserChat.findOne({ username: req.username }).lean();
     res.json({ success: true, messages: userChat ? userChat.messages : [] });
   } catch (err) {
-    res.status(500).json({ error: true, message: err.message });
+    res.status(500).json({ error: true, message: "The request could not be completed" });
   }
 });
 
-app.post("/api/chat/save-user-message", auth, async (req, res) => {
+app.post("/api/chat/save-user-message", chatLimiter, auth, requireDatabase, async (req, res) => {
   try {
-    const { message } = req.body;
-    if (!message || typeof message !== "object") return res.status(400).json({ error: true });
+    const input = req.body?.message;
+    if (!input || typeof input.text !== 'string' || input.text.length > 20000 || !['user', 'bot'].includes(input.sender)) return res.status(400).json({ error: 'Invalid message' });
+    const message = { sender: input.sender, text: input.text };
 
     await UserChat.findOneAndUpdate(
       { username: req.username },
       { $push: { messages: { $each: [message], $slice: -200 } } },
-      { upsert: true, new: true },
+      { upsert: true, returnDocument: 'after' },
     );
     res.json({ success: true });
   } catch (err) {
-    res.status(500).json({ error: true, message: err.message });
+    res.status(500).json({ error: true, message: "The request could not be completed" });
   }
 });
 
@@ -943,7 +821,7 @@ app.post("/api/chat/save-user-message", auth, async (req, res) => {
 ========================================================= */
 app.use(
   express.static(path.join(__dirname, "build"), {
-    maxAge: "7d",
+    maxAge: 0,
     setHeaders: (res, filePath) => {
       if (filePath.includes(`${path.sep}assets${path.sep}`)) {
         res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
@@ -961,7 +839,7 @@ app.use((err, req, res, next) => {
   if (res.headersSent) return next(err);
   const status = /CORS/.test(err.message) ? 403 : err.status || 500;
   console.error("Unhandled error:", err.message);
-  res.status(status).json({ error: err.message || "Internal Server Error" });
+  res.status(status).json({ error: status >= 500 ? "Service unavailable. Please try again." : err.message });
 });
 
 /* =========================================================
@@ -970,13 +848,12 @@ app.use((err, req, res, next) => {
 const PORT = process.env.PORT || 5000;
 
 async function startServer() {
-  try {
-    await connectDB();
-    await seedTestUser();
-  } catch (err) {
-    console.error("⚠️ MongoDB connection failed, server continuing:", err.message);
-  }
-  app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+  assertProductionConfig();
+  await connectDB();
+  if (process.env.NODE_ENV === 'production') await syncVectraIndex();
+  startPackageWatcher();
+  return app.listen(PORT, process.env.HOST || "127.0.0.1", () => console.log(`Server running on port ${PORT}`));
 }
 
-startServer();
+if (process.argv[1] && path.resolve(process.argv[1]) === __filename) startServer().catch(async err => { console.error(err.message); await mongoose.disconnect(); process.exitCode = 1; });
+export { app, startServer };

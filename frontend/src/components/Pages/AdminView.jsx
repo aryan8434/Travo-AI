@@ -21,7 +21,7 @@ export default function AdminView({ onBackToHome }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const fetchChunks = async () => {
+  async function fetchChunks() {
     if (!adminKey) return;
     try {
       const res = await axios.get('/api/admin/chunks', authHeaders());

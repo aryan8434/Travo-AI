@@ -139,7 +139,7 @@ export function resolveAirport(input) {
   if (!input || typeof input !== "string") return null;
   loadAirports();
   const q = input.trim().toLowerCase();
-  if (!q) return null;
+  if (q.length < 3) return null;
 
   if (_cache.byKey.has(q)) return _cache.byKey.get(q);
 
@@ -163,13 +163,12 @@ export function haversineKm(a, b) {
   const h =
     Math.sin(dLat / 2) ** 2 +
     Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
-  return 2 * R * Math.asin(Math.sqrt(h));
+  return 2 * R * Math.asin(Math.sqrt(Math.min(1, Math.max(0, h))));
 }
 
 const AIRLINES = [
   { name: "IndiGo", code: "6E", mult: 1.0 },
   { name: "Air India", code: "AI", mult: 1.18 },
-  { name: "Vistara", code: "UK", mult: 1.22 },
   { name: "SpiceJet", code: "SG", mult: 0.95 },
   { name: "Akasa Air", code: "QP", mult: 1.02 },
   { name: "Air India Express", code: "IX", mult: 0.9 },
@@ -181,18 +180,11 @@ function randTime() {
   return `${h}:${m}`;
 }
 
-function timeOfDayMultiplier(timeStr) {
-  const hour = Number(timeStr.split(":")[0]);
-  if (hour >= 5 && hour < 8) return 1.12; // early-morning premium
-  if (hour >= 18 && hour < 22) return 1.08; // evening peak
-  if (hour >= 0 && hour < 5) return 0.82; // red-eye discount
-  return 1.0;
-}
 
 /**
  * Build a list of synthetic-but-plausible flights between two resolvable cities.
  * Fare is anchored to great-circle distance at a random ₹2.0–₹2.5 per km,
- * then adjusted by airline, cabin and departure-time factors.
+ * with no hidden fare multiplier. These are estimates, not live inventory.
  *
  * @returns {{ ok: boolean, error?: string, from?: object, to?: object, distanceKm?: number, flights?: object[] }}
  */
@@ -216,24 +208,13 @@ export function buildFlights(fromCityRaw, toCityRaw, count = 40) {
   const distanceKm = Math.round(haversineKm(from, to));
   const flights = [];
 
-  for (let i = 0; i < count; i++) {
+  for (let i = 0; i < Math.min(100, Math.max(1, Math.floor(count))); i++) {
     const airline = AIRLINES[Math.floor(Math.random() * AIRLINES.length)];
     const ratePerKm = +(2.0 + Math.random() * 0.5).toFixed(2); // ₹2.0–₹2.5 / km
     const time = randTime();
 
-    // Fare is anchored to distance x ₹/km, then nudged by airline & timing.
-    const baseFare = distanceKm * ratePerKm;
-    const nonstop = Math.random() > 0.28;
-    const stopMult = nonstop ? 1.0 : 0.9; // 1-stop fares run a little cheaper
-    const raw =
-      baseFare *
-      airline.mult *
-      timeOfDayMultiplier(time) *
-      stopMult *
-      (0.96 + Math.random() * 0.08); // small seat-inventory noise
-
-    // keep fares sane: never below a floor, never absurd
-    const price = Math.max(1499, Math.round(raw / 50) * 50);
+    const price = Math.round(distanceKm * ratePerKm);
+    const nonstop = true;
 
     const cruiseKmph = 780;
     const flightHours = distanceKm / cruiseKmph + (nonstop ? 0.5 : 1.9);
@@ -243,6 +224,9 @@ export function buildFlights(fromCityRaw, toCityRaw, count = 40) {
     flights.push({
       id: `flight-${from.iata}-${to.iata}-${i}`,
       airline: airline.name,
+      currency: "INR",
+      estimated: true,
+      pricing_note: "Illustrative fare = great-circle km × ₹2.00–₹2.50/km. Route and availability require supplier confirmation.",
       flight_number: `${airline.code} ${100 + Math.floor(Math.random() * 899)}`,
       from: from.city,
       to: to.city,

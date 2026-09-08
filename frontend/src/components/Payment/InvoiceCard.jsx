@@ -5,8 +5,8 @@ const rupees = (n) =>
   `₹${Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 /**
- * Renders a TravoAI GST invoice. The invoice is for the full item value; the
- * gateway only charged the flat ₹1 confirmation fee.
+ * Renders a TravoAI payment receipt. The invoice is for the full item value; the
+ * gateway verified the full INR amount.
  */
 export default function InvoiceCard({ invoice, compact = false }) {
   if (!invoice) return null;
@@ -29,7 +29,7 @@ export default function InvoiceCard({ invoice, compact = false }) {
         <div className="flex items-center gap-2">
           <FileText className="w-4 h-4 text-cyan-400" />
           <div>
-            <h4 className="text-sm font-extrabold text-white leading-tight">Tax Invoice</h4>
+            <h4 className="text-sm font-extrabold text-white leading-tight">Payment Receipt</h4>
             <span className="text-[10px] text-cyan-400 font-mono">{invoice_no}</span>
           </div>
         </div>

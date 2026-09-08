@@ -30,3 +30,6 @@ uploads/*
 *.njsproj
 *.sln
 *.sw?
+
+# Local deployment archives contain app source, never credentials.
+.artifacts/

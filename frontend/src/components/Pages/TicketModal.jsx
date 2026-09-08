@@ -28,9 +28,9 @@ export default function TicketModal({ booking, onClose }) {
             </div>
             <div>
               <h2 className="text-lg font-bold text-white flex items-center gap-1.5">
-                Travo<span className="gradient-text">AI</span> E-Ticket
+                Travo<span className="gradient-text">AI</span> Booking Receipt
               </h2>
-              <span className="text-[10px] text-cyan-400 font-mono">Verified Travel Pass</span>
+              <span className="text-[10px] text-cyan-400 font-mono">Supplier confirmation pending</span>
             </div>
           </div>
 
@@ -128,14 +128,14 @@ export default function TicketModal({ booking, onClose }) {
               <span className="text-[10px] text-slate-400 block">
                 {paidViaWallet
                   ? 'Paid in full from TravoAI Wallet'
-                  : `Charged via Razorpay: ₹${charged.toLocaleString('en-IN')} confirmation fee`}
+                  : `Charged via Razorpay: ₹${charged.toLocaleString('en-IN')}`}
               </span>
               <span className="text-[10px] text-emerald-400 font-semibold flex items-center gap-1">
                 <ShieldCheck className="w-3 h-3" /> {paidViaWallet ? 'Wallet Settled' : 'Razorpay Verified'}
               </span>
             </div>
 
-            {isConfirmed && (
+            {isConfirmed && booking.supplier_status === "confirmed" && (
               <div className="bg-white p-2 rounded-xl shadow-md flex flex-col items-center">
                 <img
                   src={qrUrl}
@@ -152,7 +152,7 @@ export default function TicketModal({ booking, onClose }) {
 
         {/* Footer Actions */}
         <div className="p-4 bg-slate-900/90 border-t border-slate-800 flex items-center justify-between">
-          <span className="text-[10px] text-slate-400">Scan QR code at check-in counter</span>
+          <span className="text-[10px] text-slate-400">Your travel ticket will come from the supplier.</span>
           <button
             onClick={handlePrint}
             className="px-4 py-2 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-bold text-xs rounded-xl shadow-md flex items-center gap-1.5 transition-all"

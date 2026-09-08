@@ -9,24 +9,11 @@ export default function RagArchitectureModal({ isOpen, onClose }) {
   const [selectedChunk, setSelectedChunk] = useState(null);
 
   useEffect(() => {
-    if (isOpen) {
-      fetchLiveChunks();
-    }
+    if (!isOpen) return;
+    const controller = new AbortController();
+    axios.get('/api/packages', { signal: controller.signal }).then(({ data }) => setChunks(data.packages || [])).catch(() => {}).finally(() => setLoadingChunks(false));
+    return () => controller.abort();
   }, [isOpen]);
-
-  const fetchLiveChunks = async () => {
-    setLoadingChunks(true);
-    try {
-      const res = await axios.get('/api/admin/chunks');
-      if (res.data && res.data.chunks) {
-        setChunks(res.data.chunks);
-      }
-    } catch (err) {
-      console.warn('Error fetching live vector chunks:', err);
-    } finally {
-      setLoadingChunks(false);
-    }
-  };
 
   if (!isOpen) return null;
 

@@ -1,8 +1,9 @@
+import { BoundedMap } from "./boundedMap.js";
 import ChatSession from "../models/ChatSession.js";
 import mongoose from "mongoose";
 
 // Global in-memory sliding window cache fallback
-export const memoryStore = new Map();
+export const memoryStore = new BoundedMap();
 
 export async function saveMessage(sessionId, role, content) {
   if (!sessionId || !content) return;
@@ -28,7 +29,7 @@ export async function saveMessage(sessionId, role, content) {
             },
           },
         },
-        { upsert: true, new: true }
+        { upsert: true, returnDocument: 'after' }
       );
     }
   } catch (err) {

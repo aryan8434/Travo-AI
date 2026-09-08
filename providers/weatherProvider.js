@@ -3,12 +3,12 @@ import axios from "axios";
 const API_KEY = process.env.WEATHER_API_KEY;
 
 export async function fetchWeather(city) {
-  if (!city) return null;
+  if (!city || !API_KEY) return null;
 
-  const url = `http://api.weatherapi.com/v1/current.json?key=${API_KEY}&q=${encodeURIComponent(city)}&aqi=no`;
+  const url = `https://api.weatherapi.com/v1/current.json?key=${API_KEY}&q=${encodeURIComponent(city)}&aqi=no`;
 
   try {
-    const response = await axios.get(url);
+    const response = await axios.get(url, { timeout: 7000 });
     const data = response.data;
 
     if (!data || !data.location || !data.current) {

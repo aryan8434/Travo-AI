@@ -7,7 +7,7 @@ export async function connectDB() {
         });
         console.log("✅ MongoDB connected successfully");
     } catch (err) {
-        console.warn("⚠️ MongoDB Atlas connection skipped (using in-memory fallback):", err.message);
-        // Do not crash the application process
+        if (process.env.NODE_ENV === 'production') throw new Error('Persistent account storage is unavailable');
+        console.warn('MongoDB unavailable; account and payment endpoints are disabled.');
     }
 }

@@ -1,62 +1,38 @@
-# Package Content Pipeline — filling the 2,500-word guides
+# Holiday guide handoff
 
-`scripts/generatePackages.mjs` produces ~130 packages under
-`data/packages/generated/<region>/<slug>-<tier>.json`. Each has a full structured
-body plus a **`detailed_guide` skeleton**: the correct section headings, one seed
-sentence per section, and `"content_status": "skeleton"`.
+The catalogue has 129 generated package records (43 destinations × 3 tiers), plus 8 legacy records. Each generated JSON file contains one package in an array. One reference guide, `data/packages/generated/india/goa-premium.json`, is 2,257 words. Eleven pre-existing drafts are over 2,500 words; their writing is preserved and `npm run validate:packages` lists them for trimming.
 
-The RAG engine already indexes skeletons. This doc is how cheap AI agents turn
-each skeleton into a real 2,000–2,500-word guide.
-
-## What the agent does, per file
-
-1. Read the JSON file. It is an array with one package object.
-2. Take `detailed_guide` (the skeleton) and the structured fields (`itinerary`,
-   `hotel_name`, `price_inr`, `best_months`, `activities`, `nearby_attractions`,
-   `shopping_places`, `food` cues in `description`/`travel_tips`).
-3. Rewrite `detailed_guide` so that **every `##` heading is kept in the same
-   order**, each section is expanded to the word count named in its seed
-   sentence, and the whole guide totals **2,000–2,500 words**. No invented
-   prices, phone numbers, or safety claims — keep it general where unsure.
-4. Set `"content_status": "complete"` and `"word_count": <actual count>`.
-5. Write the file back (same path, `JSON.stringify(arr, null, 2)`).
-
-Do **not** change `package_id`, `price_inr`, `budget_tier`, `itinerary`, or any
-other structured field. Only `detailed_guide`, `content_status`, `word_count`.
-
-## Prompt template
-
-```
-You are a travel writer. Expand the SKELETON below into a complete guide.
-
-Rules:
-- Keep every "## Heading" exactly, in the same order. Start with the "# Title" line.
-- Hit the word count stated in each section's seed sentence; total 2000-2500 words.
-- Use ONLY the facts in CONTEXT. Do not invent prices, phone numbers, hotel names,
-  operator names, or specific medical/safety guarantees. Generalise when unsure.
-- Second person, warm but practical. Indian English. Currency in ₹.
-- Output the guide markdown only — no preamble.
-
-CONTEXT:
-<paste the JSON object's structured fields>
-
-SKELETON:
-<paste detailed_guide>
-```
-
-## Batch driver (example)
-
-A driver script can iterate every file where `content_status !== "complete"`,
-call your cheap model with the template above, validate
-`2000 <= word_count <= 2600` and that all 14 headings are present, then save.
-`data/packages/generated/india/goa-premium.json` is a finished reference example.
-
-## After filling
+## Generate the remaining writing jobs
 
 ```bash
-npm run reindex          # incremental: only re-embeds changed guides
+npm run content:jobs -- ./content-jobs.jsonl
 ```
 
-or, from the running server, `POST /api/admin/reindex` with the `x-admin-key`
-header. Re-running `npm run generate:packages` is safe — it skips any file whose
-`content_status` is already `"complete"`.
+This exports one JSONL record per remaining skeleton, with the full structured context, a model-independent writing prompt and the ingestion command. Feed the prompt to whichever economical AI agent you choose. This script makes no paid model calls.
+
+Write each result to its own Markdown file. Keep every `##` heading in the original order, use only the supplied catalogue facts, and keep the whole document at **2,000–2,500 whitespace-separated words, including headings**. All money is in INR. The section budgets total 2,300 prose words, leaving room for headings. The itinerary receives 550 words in total, even for a long trip.
+
+Do not alter IDs, prices, tier labels, guest capacity or structured itineraries. Do not invent bookings, availability, phone numbers, safety assurances or supplier inclusions. General travel advice must be phrased as planning guidance rather than a verified supplier promise.
+
+## Validate and ingest each result
+
+```bash
+npm run ingest:guide -- PKG-DARJEELING-ECO ./darjeeling.md
+```
+
+The importer checks the package ID, exact heading order and the 2,000–2,500-word limit before writing anything. It updates only `detailed_guide`, `content_status` and `word_count`, writes the source file atomically, and rebuilds the changed vectors. Submit imports sequentially: the local Vectra store is intended for a single writer. Multiple writing agents may produce independent Markdown files in parallel.
+
+Direct file edits are detected by the running server within approximately five seconds. Use the importer for its validation. Ingestion on the same machine as a running server should be performed during a maintenance window or with the server stopped, to keep one Vectra writer.
+
+```bash
+npm run validate:packages          # integrity plus editorial report
+npm run validate:packages -- --strict  # also fail on oversized completed guides
+npm run reindex                   # catch up after an offline batch
+npm run reindex -- --force         # replace every vector without duplicates
+```
+
+`npm run generate:packages` refreshes skeletons deterministically and preserves completed or other non-skeleton records. Do not run it while an agent is directly editing a skeleton JSON file. Guide passage retrieval excludes the placeholder instructions; structured summary records remain searchable before the long guide is ready.
+
+## Embeddings
+
+Set `GEMINI_API_KEY` for the configurable `gemini-embedding-001` provider. Use `EMBEDDING_PROVIDER=local` for a completely offline run. Provider failures fall back to local vectors with their actual model recorded. Model caches are separated; queries never compare a Gemini vector with a local vector. A forced rebuild can upgrade fallback chunks after provider access is restored.

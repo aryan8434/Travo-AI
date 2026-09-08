@@ -161,9 +161,10 @@ function BookingCard({ item, cardType, onBookingComplete, onBookingError, curren
           </div>
           <button
             onClick={handleBookNow}
+            disabled={item.bookable === false}
             className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs rounded-lg transition-all"
           >
-            Book Seat
+            {item.bookable === false ? 'Supplier booking unavailable' : 'Book Seat'}
           </button>
         </div>
       </motion.div>
@@ -214,9 +215,10 @@ function BookingCard({ item, cardType, onBookingComplete, onBookingError, curren
           </div>
           <button
             onClick={handleBookNow}
+            disabled={item.bookable === false}
             className="px-3 py-1.5 bg-sky-600 hover:bg-sky-500 text-white font-semibold text-xs rounded-lg transition-all"
           >
-            Book Flight
+            {item.bookable === false ? 'Estimate · booking unavailable' : 'Book Flight'}
           </button>
         </div>
       </motion.div>
@@ -255,9 +257,10 @@ function BookingCard({ item, cardType, onBookingComplete, onBookingError, curren
           </div>
           <button
             onClick={handleBookNow}
+            disabled={item.bookable === false}
             className="px-3 py-1.5 bg-amber-600 hover:bg-amber-500 text-white font-semibold text-xs rounded-lg transition-all"
           >
-            Book Room
+            {item.bookable === false ? 'Rate only · booking unavailable' : 'Book Room'}
           </button>
         </div>
       </motion.div>

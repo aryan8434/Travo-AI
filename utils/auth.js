@@ -6,7 +6,7 @@ import jwt from "jsonwebtoken";
  */
 export default function auth(req, res, next) {
   const secret = process.env.JWT_SECRET;
-  if (!secret) {
+  if (!secret || secret.length < 32) {
     console.error("JWT_SECRET missing — rejecting authenticated request");
     return res.status(503).json({ error: "Auth not configured" });
   }
@@ -19,7 +19,8 @@ export default function auth(req, res, next) {
   }
 
   try {
-    const decoded = jwt.verify(token, secret);
+    const decoded = jwt.verify(token, secret, { algorithms: ["HS256"], issuer: "travo-auth", audience: "travo-user" });
+    if (!/^[a-f0-9]{24}$/i.test(decoded.userId) || typeof decoded.username !== "string") throw new Error("Invalid identity");
     req.userId = decoded.userId;
     req.username = decoded.username;
     next();

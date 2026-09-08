@@ -1,6 +1,5 @@
 import express from "express";
 import jwt from "jsonwebtoken";
-import mongoose from "mongoose";
 import User from "../models/User.js";
 
 const router = express.Router();
@@ -10,8 +9,8 @@ const router = express.Router();
  */
 function getJwtSecret() {
   const secret = process.env.JWT_SECRET;
-  if (!secret || secret.length < 16) {
-    throw new Error("JWT_SECRET is not configured (min 16 chars)");
+  if (!secret || secret.length < 32) {
+    throw new Error("JWT_SECRET is not configured (min 32 chars)");
   }
   return secret;
 }
@@ -20,36 +19,8 @@ function issueToken(user) {
   return jwt.sign(
     { userId: user._id, username: user.username },
     getJwtSecret(),
-    { expiresIn: "30d" },
+    { expiresIn: "1d", algorithm: "HS256", issuer: "travo-auth", audience: "travo-user" },
   );
-}
-
-// Seed default test account (hashed password).
-export async function seedTestUser() {
-  if (mongoose.connection.readyState !== 1) {
-    console.warn("Skipping test user seed — MongoDB not connected");
-    return;
-  }
-  try {
-    const username = "test1234";
-    const existing = await User.findOne({ username });
-    const passwordHash = await User.hashPassword(
-      process.env.SEED_TEST_PASSWORD || "test12345",
-    );
-
-    if (!existing) {
-      await User.create({ username, passwordHash, wallet: 10000 });
-      console.log("✅ Default test user 'test1234' seeded (bcrypt-hashed password)");
-    } else if (!existing.passwordHash) {
-      // Migrate a legacy plaintext record.
-      existing.passwordHash = passwordHash;
-      existing.set("password", undefined);
-      await existing.save();
-      console.log("✅ Migrated legacy 'test1234' record to hashed password");
-    }
-  } catch (err) {
-    console.warn("Test user seed warning:", err.message);
-  }
 }
 
 // User Signup Endpoint
@@ -57,12 +28,13 @@ router.post("/signup", async (req, res) => {
   try {
     const { username, password } = req.body;
 
-    if (!username || !password) {
+    if (typeof username !== "string" || typeof password !== "string" || !username || !password) {
       return res.status(400).json({ error: "Username and password are required" });
     }
 
     const cleanUsername = String(username).trim();
-    const cleanPassword = String(password).trim();
+    const cleanPassword = password;
+    if (username.length > 32 || Buffer.byteLength(password, "utf8") > 72) return res.status(400).json({ error: "Invalid credentials" });
 
     if (cleanUsername.length < 3 || cleanUsername.length > 32) {
       return res.status(400).json({ error: "Username must be 3-32 characters" });
@@ -74,8 +46,8 @@ router.post("/signup", async (req, res) => {
         .json({ error: "Username may only contain letters, numbers, and _ . -" });
     }
 
-    if (cleanPassword.length < 6 || cleanPassword.length > 128) {
-      return res.status(400).json({ error: "Password must be 6-128 characters" });
+    if (cleanPassword.length < 8 || Buffer.byteLength(cleanPassword, "utf8") > 72) {
+      return res.status(400).json({ error: "Password must be at least 8 characters and at most 72 UTF-8 bytes" });
     }
 
     const exists = await User.findOne({ username: cleanUsername });
@@ -89,13 +61,14 @@ router.post("/signup", async (req, res) => {
     const newUser = await User.create({
       username: cleanUsername,
       passwordHash,
-      wallet: 10000,
+      ledgerVersion: 2,
+      wallet: 0,
     });
 
     res.json({
       success: true,
       token: issueToken(newUser),
-      user: { username: cleanUsername, walletBalance: 10000 },
+      user: { username: cleanUsername, walletBalance: 0 },
     });
   } catch (err) {
     console.error("Signup error:", err);
@@ -108,12 +81,13 @@ router.post("/login", async (req, res) => {
   try {
     const { username, password } = req.body;
 
-    if (!username || !password) {
+    if (typeof username !== "string" || typeof password !== "string" || !username || !password) {
       return res.status(400).json({ error: "Username and password are required" });
     }
 
     const cleanUsername = String(username).trim();
-    const cleanPassword = String(password).trim();
+    const cleanPassword = password;
+    if (username.length > 32 || Buffer.byteLength(password, "utf8") > 72) return res.status(400).json({ error: "Invalid credentials" });
 
     const user = await User.findOne({ username: cleanUsername });
 
@@ -121,7 +95,7 @@ router.post("/login", async (req, res) => {
     const invalid = () =>
       res.status(400).json({ error: "Invalid username or password" });
 
-    if (!user || !user.passwordHash) return invalid();
+    if (cleanUsername === "test1234" || !user || !user.passwordHash) return invalid();
 
     const ok = await user.verifyPassword(cleanPassword);
     if (!ok) return invalid();
@@ -131,7 +105,7 @@ router.post("/login", async (req, res) => {
       token: issueToken(user),
       user: {
         username: user.username,
-        walletBalance: user.wallet ?? 10000,
+        walletBalance: user.wallet ?? 0,
       },
     });
   } catch (err) {

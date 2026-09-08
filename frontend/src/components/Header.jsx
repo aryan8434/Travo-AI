@@ -7,7 +7,7 @@ export default function Header({
   activeCity,
   selectedCategory,
   setSelectedCategory,
-  walletBalance = 10000,
+  walletBalance = 0,
   onOpenWallet,
   currentUser,
   onOpenAuthModal,
@@ -40,14 +40,14 @@ export default function Header({
               <h1 className="text-lg font-bold tracking-tight text-white flex items-center gap-1.5">
                 Travo<span className="gradient-text">AI</span>
               </h1>
-              <span className="text-[10px] uppercase font-bold px-2 py-0.5 rounded-full bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 flex items-center gap-1">
+              <span className="hidden md:flex text-[10px] uppercase font-bold px-2 py-0.5 rounded-full bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 flex items-center gap-1">
                 <Cpu className="w-3 h-3 text-cyan-400" /> Groq AI
               </span>
               <span className="text-[10px] uppercase font-bold px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 flex items-center gap-1">
                 <Database className="w-3 h-3 text-emerald-400" /> Vectra DB
               </span>
             </div>
-            <p className="text-[11px] text-slate-400">Groq LLM + Vectra Local Vector Database Concierge</p>
+            <p className="hidden sm:block text-[11px] text-slate-400">Your holiday, planned around you</p>
           </div>
         </div>
       </div>

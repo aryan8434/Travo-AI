@@ -1,3 +1,4 @@
+import { BoundedMap } from "./boundedMap.js";
 import mongoose from "mongoose";
 import ChatSession from "../models/ChatSession.js";
 
@@ -24,11 +25,12 @@ const SLOT_KEYS = [
   "budgetMin",
   "budgetMax",
   "budgetTier",
+  "people",
   "timePreference",
 ];
 
 // sessionId -> { activeCity, ...slots }
-const memory = new Map();
+const memory = new BoundedMap();
 
 // Slots only carry over between turns of the same booking flow.
 const CARRYOVER_INTENTS = new Set(["flight", "bus", "hotel_search", "trip_plan"]);

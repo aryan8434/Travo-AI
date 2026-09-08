@@ -66,7 +66,8 @@ export default function MessageItem({ message, onBookingComplete, onBookingError
             </div>
           )}
 
-          {/* GST invoice for the full amount (₹1 charged via gateway) */}
+          {message.sources?.length > 0 && <ol className="list-decimal pl-4 text-xs text-cyan-300 mt-3">{message.sources.map(source => <li key={source.chunk_id}>{source.title} — {source.section}</li>)}</ol>}
+          {/* Server-issued payment receipt */}
           {!isUser && (message.invoice || message.booking?.invoice) && (
             <div className="mt-4">
               <InvoiceCard invoice={message.invoice || message.booking.invoice} />
