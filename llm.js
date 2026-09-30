@@ -392,7 +392,9 @@ export async function generateGroundedAnswer(question, sources, fallbackText) {
   try {
     const context = sources.map((s, i) => '[' + (i + 1) + '] ' + s.package_id + ' | ' + s.title + ' | ' + s.section + '\n' + s.text).join('\n\n');
     const raw = await (LLM_PROVIDER === 'gemini' ? callGemini : callGroq)(prompt, [{ role: 'user', content: JSON.stringify({ question, catalogue_passages: context }) }]);
-    const answer = JSON.parse(raw).answer;
+    const parsed = JSON.parse(raw).answer;
+    // gpt-oss models sometimes cite as 【1】 or 【1†L3-L5】 instead of [1].
+    const answer = typeof parsed === 'string' ? parsed.replace(/【(\d+)(?:†[^】]*)?】/g, '[$1]') : undefined;
     const refs = typeof answer === 'string' ? [...answer.matchAll(/\[(\d+)\]/g)].map(m => Number(m[1])) : [];
     return answer?.length <= 6000 && refs.length && refs.every(i => i >= 1 && i <= sources.length) ? answer : fallback;
   } catch { return fallback; }
