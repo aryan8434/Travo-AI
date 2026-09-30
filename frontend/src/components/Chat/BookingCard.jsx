@@ -150,6 +150,12 @@ function BookingCard({ item, cardType, onBookingComplete, onBookingError, curren
               <span>{item.from || item.from_city} ➔ {item.to || item.to_city}</span>
               <span className="ml-2 text-cyan-400 font-mono">🕒 {item.time || item.departure_time}</span>
             </div>
+            {item.distance_km && (
+              <div className="text-[10px] text-slate-500 mt-0.5">
+                ~{item.distance_km.toLocaleString('en-IN')} km by road · ₹{item.rate_per_km}/km
+                {item.duration ? ` · ~${item.duration}` : ''}
+              </div>
+            )}
           </div>
         </div>
 
@@ -165,7 +171,7 @@ function BookingCard({ item, cardType, onBookingComplete, onBookingError, curren
             disabled={item.bookable === false}
             className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs rounded-lg transition-all"
           >
-            {item.bookable === false ? 'Supplier booking unavailable' : 'Book Seat'}
+            {item.bookable === false ? 'Estimate · booking unavailable' : 'Book Seat'}
           </button>
         </div>
       </motion.div>

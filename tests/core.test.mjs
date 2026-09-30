@@ -474,3 +474,35 @@ test('invoice PDFs render from stored receipts for their owner only', async () =
   await request(app).get('/user/invoice.pdf').query({ no: '../../etc/passwd' }).set('Authorization', bearer()).expect(400);
   await request(app).get('/user/invoice.pdf').query({ no: invoice.invoice_no }).expect(401);
 });
+
+test('bus search returns labelled, unbookable distance estimates', async () => {
+  const { buildBuses } = await import('../utils/busEngine.js');
+  const route = buildBuses('Delhi', 'Jaipur');
+  assert.equal(route.ok, true);
+  assert.ok(route.roadKm > 200 && route.roadKm < 400);
+  assert.ok(route.buses.length > 0 && route.buses.every(b => b.estimated === true && b.price === Math.max(100, Math.round(route.roadKm * b.rate_per_km))));
+  assert.ok(route.buses.every(b => attachQuote(b, 'bus').bookable === false));
+  assert.deepEqual(buildBuses('Delhi', 'Jaipur'), route, 'estimates are deterministic');
+  assert.match(buildBuses('Delhi', 'Chennai').error, /too long for a bus/);
+  assert.match(buildBuses('Delhi', 'Atlantis').error, /can't place "Atlantis"/);
+
+  await request(publicApp).get('/api/buses').query({ from: 'Delhi' }).expect(400);
+  const api = await request(publicApp).get('/api/buses').query({ from: 'Delhi', to: 'Jaipur' }).expect(200);
+  assert.ok(api.body.buses.every(b => b.bookable === false));
+  const chat = await request(publicApp).post('/chat').send({ message: 'buses from delhi to jaipur' }).expect(200);
+  assert.equal(chat.body.intent, 'bus');
+  assert.ok(chat.body.results.length > 0 && chat.body.results.every(b => b.bookable === false));
+});
+
+test('a service named mid-flow switches flows even when the model answers "general"', async () => {
+  const { namedServiceIntent, mergeIntent } = await import('../utils/sessionContext.js');
+  const previous = { intent: 'bus', from: 'Delhi' };
+  assert.equal(mergeIntent(previous, namedServiceIntent('flights', { intent: 'general' }, previous)).intent, 'flight');
+  assert.equal(namedServiceIntent('flights', { intent: 'bus' }, previous).intent, 'flight');
+  assert.equal(namedServiceIntent('hotels', { intent: 'general' }, previous).intent, 'hotel_search');
+  // No carried flow, the same flow, two services, or a different specific model intent: unchanged.
+  assert.equal(namedServiceIntent('how long should I stay in Goa?', { intent: 'general' }, {}).intent, 'general');
+  assert.equal(namedServiceIntent('buses', { intent: 'general' }, previous).intent, 'general');
+  assert.equal(namedServiceIntent('weather for my flight', { intent: 'general' }, previous).intent, 'general');
+  assert.equal(namedServiceIntent('hotel near goa beach', { intent: 'trip_plan' }, previous).intent, 'trip_plan');
+});
