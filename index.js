@@ -115,7 +115,7 @@ app.use(
 
 const paymentsRouter = createPaymentRouter();
 app.use('/api', (req, res, next) => {
-  if (req.path === '/payments/webhook') return paymentsRouter(req, res, next);
+  if (['/payments/webhook', '/payments/config'].includes(req.path)) return paymentsRouter(req, res, next);
   next();
 });
 app.use(express.json({ limit: "1mb" }));

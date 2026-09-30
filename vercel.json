@@ -19,7 +19,7 @@
   "functions": {
     "api/index.js": {
       "maxDuration": 60,
-      "includeFiles": "{data/**,.vercel-rag/index.json}",
+      "includeFiles": "{data/**,.vercel-rag/index.json,node_modules/pdfkit/js/standard-fonts/**,node_modules/pdfkit/js/data/**}",
       "excludeFiles": "{frontend/**,tests/**,docs/**,deploy/**,build/**,vectra_index/**,.env,.env.*,backend/**,.tmp-*,.artifacts/**}"
     }
   },

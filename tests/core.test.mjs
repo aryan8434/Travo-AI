@@ -411,3 +411,66 @@ test('hotel API and chat return catalogue stays', async () => {
   assert.equal(chat.body.type, 'hotel');
   assert.ok(chat.body.results.length > 0 && chat.body.results.every(h => h.city === 'Goa'));
 });
+
+const sendErrors = (err, req, res, next) => res.status(err.status || 500).json({ error: err.message });
+const binary = (res, done) => { const chunks = []; res.on('data', c => chunks.push(c)); res.on('end', () => done(null, Buffer.concat(chunks))); };
+
+test('test mode takes only rzp_test_ keys, needs no webhook and labels receipts', async () => {
+  const { productionIssues } = await import('../utils/productionConfig.js');
+  const base = { JWT_SECRET: 'a'.repeat(48), MONGO_URI: 'mongodb://database/travo', CORS_ORIGINS: 'https://travel.example.com', RAZORPAY_MODE: 'test', RAZORPAY_KEY_SECRET: 'fixture-secret' };
+  assert.deepEqual(productionIssues({ ...base, RAZORPAY_KEY_ID: 'rzp_test_fixture' }), []);
+  assert.ok(productionIssues({ ...base, RAZORPAY_KEY_ID: 'rzp_live_fixture' }).length);
+  assert.ok(productionIssues({ ...base, RAZORPAY_KEY_ID: 'rzp_test_fixture', RAZORPAY_WEBHOOK_SECRET: 'short' }).length);
+
+  const testApp = express();
+  testApp.use(express.json());
+  testApp.use(createPaymentRouter({ gateway, keyId: 'rzp_test_fixture', keySecret, mode: 'test' }));
+  testApp.use(sendErrors);
+  assert.deepEqual((await request(testApp).get('/payments/config').expect(200)).body, { enabled: true, mode: 'test' });
+  assert.deepEqual((await request(app).get('/api/payments/config').expect(200)).body, { enabled: true, mode: 'live' });
+  await request(testApp).post('/payments/webhook').send({}).expect(503);
+
+  const order = (await request(testApp).post('/create-order').set('Authorization', bearer()).send({ kind: 'wallet', amount: 500 }).expect(200)).body;
+  assert.equal(order.mode, 'test');
+  assert.equal(order.key_id, 'rzp_test_fixture');
+  process.env.RAZORPAY_MODE = 'test';
+  try {
+    const settled = (await request(testApp).post('/verify-payment').set('Authorization', bearer()).send(proof(order)).expect(200)).body;
+    assert.equal(settled.invoice.test_mode, true);
+    assert.match(settled.invoice.settlement_note, /test mode: no real money/);
+  } finally { delete process.env.RAZORPAY_MODE; }
+});
+
+test('an authorized payment is captured for its exact order before crediting', async () => {
+  const captured = [];
+  const captureGateway = { ...gateway, payments: {
+    fetch: async id => payments.get(id),
+    capture: async (id, amount, currency) => { captured.push([id, amount, currency]); payments.set(id, { ...payments.get(id), status: 'captured', captured: true }); return payments.get(id); },
+  } };
+  const captureApp = express();
+  captureApp.use(express.json());
+  captureApp.use(createPaymentRouter({ gateway: captureGateway, keyId: 'rzp_live_fixture', keySecret, webhookSecret }));
+  captureApp.use(sendErrors);
+  const before = (await User.findById(user._id)).wallet;
+  const order = (await request(captureApp).post('/create-order').set('Authorization', bearer()).send({ kind: 'wallet', amount: 700 }).expect(200)).body;
+  const payload = proof(order, { status: 'authorized', captured: false });
+  await request(captureApp).post('/verify-payment').set('Authorization', bearer()).send(payload).expect(200);
+  assert.deepEqual(captured, [[payload.razorpay_payment_id, 70000, 'INR']]);
+  assert.equal((await User.findById(user._id)).wallet, before + 700);
+
+  const mismatched = (await request(captureApp).post('/create-order').set('Authorization', bearer()).send({ kind: 'wallet', amount: 700 }).expect(200)).body;
+  await request(captureApp).post('/verify-payment').set('Authorization', bearer()).send(proof(mismatched, { status: 'authorized', captured: false, amount: 100 })).expect(400);
+  assert.equal(captured.length, 1);
+});
+
+test('invoice PDFs render from stored receipts for their owner only', async () => {
+  const order = await walletOrder(1500);
+  const { invoice } = (await request(app).post('/api/verify-payment').set('Authorization', bearer()).send(proof(order)).expect(200)).body;
+  const pdf = await request(app).get('/user/invoice.pdf').query({ no: invoice.invoice_no }).set('Authorization', bearer()).buffer(true).parse(binary).expect(200);
+  assert.equal(pdf.headers['content-type'], 'application/pdf');
+  assert.match(pdf.headers['content-disposition'], /attachment; filename="TravoAI-TRV-[A-F0-9]{16}\.pdf"/);
+  assert.equal(pdf.body.subarray(0, 5).toString(), '%PDF-');
+  await request(app).get('/user/invoice.pdf').query({ no: invoice.invoice_no }).set('Authorization', `Bearer ${otherToken}`).expect(404);
+  await request(app).get('/user/invoice.pdf').query({ no: '../../etc/passwd' }).set('Authorization', bearer()).expect(400);
+  await request(app).get('/user/invoice.pdf').query({ no: invoice.invoice_no }).expect(401);
+});

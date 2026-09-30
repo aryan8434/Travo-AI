@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import User from '../models/User.js';
 import auth from '../utils/auth.js';
 import { buildInvoice } from '../utils/invoice.js';
+import { renderInvoicePdf } from '../utils/invoicePdf.js';
 import { resolveBooking, httpError } from '../utils/checkout.js';
 import { createBookingRecord, requireDatabase, requireVerifiedLedger } from './payments.js';
 
@@ -32,6 +33,24 @@ router.post('/book', requireVerifiedLedger, async (req, res) => {
     throw httpError(400, 'Insufficient wallet balance');
   }
   res.json({ success: true, booking, wallet: updated.wallet });
+});
+
+// Receipts are rendered from the stored record, never from client-supplied data.
+router.get('/invoice.pdf', async (req, res) => {
+  const number = req.query.no;
+  if (typeof number !== 'string' || !/^TRV\/[A-F0-9]{16}$/.test(number)) throw httpError(400, 'A valid invoice number is required');
+  const user = await User.findById(req.userId).select('bookings walletHistory');
+  if (!user) throw httpError(404, 'User not found');
+  const booking = user.bookings.find(b => b?.invoice?.invoice_no === number) || null;
+  const invoice = booking?.invoice || user.walletHistory.find(h => h?.invoice?.invoice_no === number)?.invoice;
+  if (!invoice) throw httpError(404, 'Invoice not found');
+  const pdf = await renderInvoicePdf(invoice, booking);
+  res.set({
+    'Content-Type': 'application/pdf',
+    'Content-Disposition': `attachment; filename="TravoAI-${number.replace('/', '-')}.pdf"`,
+    'Cache-Control': 'private, no-store',
+  });
+  res.send(pdf);
 });
 
 // Legacy endpoint cannot independently mint credit or reuse a payment.

@@ -38,7 +38,9 @@ export async function initializePayment(item, onSuccess, onError) {
     }
     await loadRazorpayScript();
     const { data: order } = await axios.post('/api/create-order', { kind, item: selection, amount: price });
-    if (!order.success || !/^rzp_live_/.test(order.key_id)) throw new Error('Live checkout is unavailable');
+    // The key prefix must agree with the mode the server reports (test keys only in test mode).
+    const keyPattern = order.mode === 'test' ? /^rzp_test_/ : /^rzp_live_/;
+    if (!order.success || !keyPattern.test(order.key_id)) throw new Error('Checkout is unavailable');
     let verifying = false;
     const rzp = new window.Razorpay({
       key: order.key_id, order_id: order.order_id, amount: order.amount, currency: 'INR',

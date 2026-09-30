@@ -6,6 +6,7 @@ import ChatBox from './components/Chat/ChatBox';
 import RightSidebar from './components/Sidebar/RightSidebar';
 import LeftDrawer from './components/Sidebar/LeftDrawer';
 import AuthModal from './components/Auth/AuthModal';
+import TestModeBanner from './components/Payment/TestModeBanner';
 
 // Pages — lazy so each is a separate chunk, loaded on first navigation
 const FlightsView = lazy(() => import('./components/Pages/FlightsView'));
@@ -260,6 +261,7 @@ export default function App() {
         onLogout={handleLogout}
         onOpenRagModal={() => setIsRagModalOpen(true)}
       />
+      <TestModeBanner />
 
       {/* Sliding YouTube-style Left Navigation Drawer */}
       <LeftDrawer

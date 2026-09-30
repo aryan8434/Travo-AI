@@ -31,9 +31,14 @@ Set these in Vercel for the environment being deployed:
 - `JWT_SECRET`: a random secret of at least 32 characters, stable across instances.
 - `CORS_ORIGINS`: exact HTTPS website origins, comma-separated. The deployment's
   own `VERCEL_URL` is also allowed automatically.
-- `RAZORPAY_KEY_ID` and `RAZORPAY_KEY_SECRET`: fresh live credentials. Previously
-  exposed and test-mode credentials remain rejected.
+- `RAZORPAY_MODE`: `live` (default) or `test`. Test mode is for demos: it accepts
+  only `rzp_test_` keys, so no real money moves, marks every receipt as a test, and
+  shows visitors Razorpay's test card and UPI details.
+- `RAZORPAY_KEY_ID` and `RAZORPAY_KEY_SECRET`: a key pair matching the mode. Live mode
+  needs fresh live credentials; the previously exposed key is rejected in either mode.
 - `RAZORPAY_WEBHOOK_SECRET`: a separate random secret of at least 32 characters.
+  Required in live mode; optional in test mode, where browser verification settles
+  payments on its own.
 - `LLM_PROVIDER`, `GROQ_API_KEY` / `GEMINI_API_KEY`, and optional model overrides.
 - Optional `ADMIN_KEY` and `WEATHER_API_KEY`. Hotel search uses the stays named in the package catalogue and needs no key.
 
@@ -62,6 +67,6 @@ deployment; verify network access with `/health/ready` after deployment.
 The deployment upload excludes local environment files, temporary guide drafts,
 test artifacts, local vector caches, and private key files. Vercel startup fails
 closed if core configuration or MongoDB is unavailable. Missing payment credentials
-disable checkout and webhook processing without blocking travel APIs. Checkout
+disable checkout and webhook processing without blocking travel APIs. Live checkout
 requires all three fresh live Razorpay credentials, including a separate webhook
-secret. The full production configuration audit still reports payment issues.
+secret; test mode needs only the `rzp_test_` key pair. The full production configuration audit still reports payment issues.
