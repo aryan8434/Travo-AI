@@ -47,7 +47,7 @@ const bearer = () => `Bearer ${token}`;
 const signToken = u => jwt.sign({ userId: String(u._id), username: u.username }, process.env.JWT_SECRET, { algorithm: 'HS256', expiresIn: '1h', issuer: 'travo-auth', audience: 'travo-user' });
 
 before(async () => {
-  mongo = await MongoMemoryServer.create();
+  mongo = await MongoMemoryServer.create({ instance: { launchTimeout: 60000 } });
   await mongoose.connect(mongo.getUri());
   user = await User.create({ username: 'security-test', ledgerVersion: 2, passwordHash: await User.hashPassword('valid-password-123') });
   token = signToken(user);
@@ -85,6 +85,15 @@ test('payments require authentication and reject simulation signatures', async (
 test('test keys fail closed even when a gateway is provided', async () => {
   const disabled = express(); disabled.use(express.json()); disabled.use(createPaymentRouter({ gateway, keyId: 'rzp_test_fixture', keySecret }));
   await request(disabled).post('/create-order').set('Authorization', bearer()).send({ kind: 'wallet', amount: 1 }).expect(503);
+});
+test('live checkout requires a separate valid webhook secret before creating orders', async () => {
+  const failGateway = { orders: { create: () => assert.fail('Disabled checkout called the gateway') } };
+  for (const secret of ['', 'short', process.env.JWT_SECRET]) {
+    const disabled = express();
+    disabled.use(express.json());
+    disabled.use(createPaymentRouter({ gateway: failGateway, keyId: 'rzp_live_fixture', keySecret, webhookSecret: secret }));
+    await request(disabled).post('/create-order').set('Authorization', bearer()).send({ kind: 'wallet', amount: 1 }).expect(503);
+  }
 });
 test('order charge is full INR amount and only its owner can settle', async () => {
   const order = await walletOrder();
@@ -226,22 +235,6 @@ test('guest history is isolated from caller session IDs; package follow-ups keep
   assert.equal(separate.body.intent, 'general');
 });
 
-test('hotel prices require an explicit INR currency; USD is never guessed from amount', async () => {
-  const { default: axios } = await import('axios');
-  const { fetchRealHotels } = await import('../providers/hotelProvider.js');
-  const original = axios.get, key = process.env.MAKCORPS_API_TOKEN;
-  process.env.MAKCORPS_API_TOKEN = 'fixture-only';
-  try {
-    axios.get = async () => ({ data: [
-      [{ hotelName: 'USD hotel' }, [{ currency: 'USD', price1: 800 }]],
-      [{ hotelName: 'Unknown currency' }, [{ price1: 200 }]],
-      [{ hotelName: 'INR hotel' }, [{ currency: 'INR', price1: 6000 }]],
-    ] });
-    const hotels = await fetchRealHotels('Delhi');
-    assert.deepEqual(hotels.map(h => [h.name, h.price, h.currency]), [['INR hotel', 6000, 'INR']]);
-  } finally { axios.get = original; if (key === undefined) delete process.env.MAKCORPS_API_TOKEN; else process.env.MAKCORPS_API_TOKEN = key; }
-});
-
 function webhook(event, signature) {
   const body = JSON.stringify(event);
   return request(app).post('/api/payments/webhook').set('Content-Type', 'application/json').set('x-razorpay-signature', signature || crypto.createHmac('sha256', webhookSecret).update(body).digest('hex')).send(body);
@@ -281,6 +274,25 @@ test('production configuration fails closed and health checks expose no secrets'
   assert.ok(productionIssues({ ...config, RAZORPAY_KEY_ID: 'rzp_test_fixture' }).length);
   assert.deepEqual((await request(publicApp).get('/health/ready').expect(200)).body, { status: 'ready' });
 });
+test('Vercel travel APIs work without payments but still reject invalid core configuration', async () => {
+  const { default: handler } = await import('../api/index.js');
+  const names = ['NODE_ENV', 'MONGO_URI', 'CORS_ORIGINS', 'RAZORPAY_KEY_ID', 'RAZORPAY_KEY_SECRET', 'RAZORPAY_WEBHOOK_SECRET'];
+  const saved = Object.fromEntries(names.map(name => [name, process.env[name]]));
+  Object.assign(process.env, { NODE_ENV: 'production', MONGO_URI: mongo.getUri(), CORS_ORIGINS: 'https://travel.example.com', RAZORPAY_KEY_ID: '', RAZORPAY_KEY_SECRET: '', RAZORPAY_WEBHOOK_SECRET: '' });
+  const deployed = express(); deployed.use(handler);
+  try {
+    await request(deployed).get('/health/ready').expect(200);
+    const catalog = await request(deployed).get('/api/packages').expect(200);
+    assert.ok(catalog.body.packages.length > 0);
+    assert.match(catalog.headers['content-security-policy'], /script-src[^;]*https:\/\/cdn\.razorpay\.com/);
+    const config = JSON.parse(fs.readFileSync(new URL('../vercel.json', import.meta.url), 'utf8'));
+    assert.match(config.headers[0].headers.find(h => h.key === 'Content-Security-Policy').value, /script-src[^;]*https:\/\/cdn\.razorpay\.com/);
+    process.env.MONGO_URI = '';
+    assert.deepEqual((await request(deployed).get('/api/packages').expect(503)).body, { error: 'Service unavailable. Please try again.' });
+  } finally {
+    for (const name of names) { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; }
+  }
+});
 test('estimates and unconnected supplier rates cannot become payable quotes', () => {
   for (const item of [buildFlights('Delhi', 'Mumbai', 1).flights[0], { id: 'hotel-rate', price: 5000 }]) {
     const quoted = attachQuote(item, 'flight');
@@ -288,4 +300,114 @@ test('estimates and unconnected supplier rates cannot become payable quotes', ()
     assert.equal(quoted.quote, undefined);
     assert.throws(() => resolveBooking({ ...quoted, bookable: true }));
   }
+});
+
+test('session slots observe changes made by another backend instance', async () => {
+  const { saveSlots, getSlots } = await import('../utils/sessionContext.js');
+  const { default: ChatSession } = await import('../models/ChatSession.js');
+  const sessionId = crypto.randomUUID();
+  await saveSlots(sessionId, { intent: 'flight', from: 'Delhi' });
+  await ChatSession.updateOne({ sessionId }, { $set: { context: { intent: 'flight', from: 'Mumbai' } } });
+  assert.equal((await getSlots(sessionId)).from, 'Mumbai');
+});
+
+test('guest cookies survive another instance but forged signatures are replaced', async () => {
+  const instances = [];
+  for (const name of ['first', 'second']) {
+    const { chatIdentity } = await import(`../utils/chatIdentity.js?instance=${name}`);
+    const instance = express();
+    instance.get('/', chatIdentity, (req, res) => res.json({ id: req.chatSessionId }));
+    instances.push(instance);
+  }
+  const first = await request(instances[0]).get('/').expect(200);
+  const cookie = first.headers['set-cookie'][0].split(';')[0];
+  const second = await request(instances[1]).get('/').set('Cookie', cookie).expect(200);
+  assert.equal(second.body.id, first.body.id);
+  assert.equal(second.headers['set-cookie'], undefined);
+  const forged = cookie.slice(0, -64) + '0'.repeat(64);
+  const rejected = await request(instances[1]).get('/').set('Cookie', forged).expect(200);
+  assert.notEqual(rejected.body.id, first.body.id);
+});
+
+test('rate limits count concurrent requests across instances and isolate namespaces', async () => {
+  const { MongoRateLimitStore } = await import('../utils/mongoRateLimitStore.js');
+  const prefix = crypto.randomUUID();
+  const stores = [new MongoRateLimitStore(prefix), new MongoRateLimitStore(prefix), new MongoRateLimitStore(`${prefix}-other`)];
+  for (const store of stores) store.init({ windowMs: 60000 });
+  const hits = await Promise.all(Array.from({ length: 12 }, (_, i) => stores[i % 2].increment('client')));
+  assert.deepEqual(hits.map(hit => hit.totalHits).sort((a, b) => a - b), Array.from({ length: 12 }, (_, i) => i + 1));
+  assert.equal((await stores[2].increment('client')).totalHits, 1);
+  await stores[0].resetKey('client');
+  assert.equal((await stores[1].increment('client')).totalHits, 1);
+});
+
+test('weather lookups pin known Indian places and name icon-only conditions', async () => {
+  const { weatherQuery, conditionText } = await import('../providers/weatherProvider.js');
+  assert.equal(weatherQuery('Delhi'), 'Delhi, India');
+  assert.equal(weatherQuery('Manali'), 'Manali, Himachal Pradesh, India');
+  assert.equal(weatherQuery('Dubai'), 'Dubai');
+  assert.equal(weatherQuery('Paris'), 'Paris');
+  assert.equal(weatherQuery('Delhi, Ontario'), 'Delhi, Ontario');
+  assert.equal(conditionText({ icon: '//cdn.weatherapi.com/weather/64x64/night/113.png' }), 'Clear');
+  assert.equal(conditionText({ icon: '//cdn.weatherapi.com/weather/64x64/day/353.png' }), 'Light rain shower');
+  assert.equal(conditionText({ text: 'Mist', icon: '//cdn.weatherapi.com/weather/64x64/day/113.png' }), 'Mist');
+  assert.equal(conditionText({}), 'Unknown Condition');
+});
+
+test('hotel search ranks catalogue stays via RAG without inventing nightly rates', async () => {
+  const { searchHotels } = await import('../utils/hotelSearch.js');
+  const goa = await searchHotels('hotels in goa', { city: 'Goa' });
+  assert.equal(goa.location, 'Goa');
+  assert.ok(goa.hotels.length > 0 && goa.hotels.every(h => h.city === 'Goa' && h.source === 'catalogue'));
+  for (const h of goa.hotels) {
+    const pkg = loadAllPackages().find(p => p.package_id === h.package.package_id);
+    assert.equal(h.name, pkg.hotel_name);
+    assert.equal(h.package.price_inr, pkg.price_inr);
+    // Card detection keys off these; a stay must never render as a package or claim a room rate.
+    assert.equal(h.package_id, undefined);
+    assert.equal(h.price, undefined);
+    assert.equal(attachQuote(h, 'hotel').bookable, false);
+  }
+  assert.equal(new Set(goa.hotels.map(h => h.name)).size, goa.hotels.length);
+
+  const cheap = await searchHotels('hotels in jaipur under 3000', { city: 'Jaipur', budget: 3000 });
+  assert.equal(cheap.withinBudget, false);
+  assert.match(cheap.text, /None come in under/);
+  const perNight = cheap.hotels.map(h => h.package_price_per_night);
+  assert.deepEqual(perNight, [...perNight].sort((a, b) => a - b));
+
+  const roomy = await searchHotels('hotels in goa', { city: 'Goa', budget: 30000 });
+  assert.equal(roomy.withinBudget, true);
+  assert.ok(roomy.hotels.every(h => h.package_price_per_night <= 30000));
+
+  assert.equal((await searchHotels('which hotel in andaman is on the beach?', { city: 'Andaman' })).location, 'Andaman');
+  // Without a cited LLM answer, a question keeps the listing instead of dumping raw passages.
+  assert.match((await searchHotels('which hotel in goa has a spa?', { city: 'Goa' })).text, /^🏨 Stays in \*\*Goa\*\*/);
+});
+
+test('hotel search suggests the nearest covered destinations and admits gaps', async () => {
+  const { searchHotels } = await import('../utils/hotelSearch.js');
+  const delhi = await searchHotels('hotels in delhi', { city: 'Delhi' });
+  assert.equal(delhi.location, null);
+  assert.equal(delhi.nearby, true);
+  const distances = delhi.hotels.map(h => h.distance_km);
+  assert.ok(distances.length > 0 && distances.every(d => d <= 800));
+  assert.deepEqual(distances, [...distances].sort((a, b) => a - b));
+  assert.equal(new Set(delhi.hotels.map(h => h.city)).size, delhi.hotels.length);
+  assert.match(delhi.text, /No catalogue stays in \*\*Delhi\*\*/);
+
+  const paris = await searchHotels('hotels in paris', { city: 'Paris' });
+  assert.deepEqual(paris.hotels, []);
+  assert.match(paris.text, /don't have hotel stays for \*\*Paris\*\*/);
+});
+
+test('hotel API and chat return catalogue stays', async () => {
+  await request(publicApp).get('/api/hotels').expect(400);
+  await request(publicApp).get('/api/hotels').query({ city: 'Goa', budget: -5 }).expect(400);
+  const api = await request(publicApp).get('/api/hotels').query({ city: 'Goa' }).expect(200);
+  assert.ok(api.body.hotels.length > 0 && api.body.hotels.every(h => h.bookable === false && h.package?.package_id));
+
+  const chat = await request(publicApp).post('/chat').send({ message: 'hotels in goa' }).expect(200);
+  assert.equal(chat.body.type, 'hotel');
+  assert.ok(chat.body.results.length > 0 && chat.body.results.every(h => h.city === 'Goa'));
 });

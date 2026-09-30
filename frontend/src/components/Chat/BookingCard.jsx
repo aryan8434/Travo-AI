@@ -22,7 +22,7 @@ function BookingCard({ item, cardType, onBookingComplete, onBookingError, curren
 
   const actualPriceInRupees = Number(item.price_inr || item.price || item.price_per_night_inr || 1000);
 
-  const handleBookNow = () => {
+  const checkout = (selection) => {
     // ENFORCE LOGIN GUARD: No booking allowed unless user is signed in!
     if (!currentUser) {
       if (onOpenAuthModal) onOpenAuthModal();
@@ -30,7 +30,7 @@ function BookingCard({ item, cardType, onBookingComplete, onBookingError, curren
     }
 
     initializePayment(
-      item,
+      selection,
       (booking) => {
         if (onBookingComplete) onBookingComplete(booking);
       },
@@ -39,6 +39,7 @@ function BookingCard({ item, cardType, onBookingComplete, onBookingError, curren
       }
     );
   };
+  const handleBookNow = () => checkout(item);
 
   /* =========================================================
      1. HOLIDAY PACKAGE CARD (RAG VECTOR RESULT)
@@ -226,7 +227,57 @@ function BookingCard({ item, cardType, onBookingComplete, onBookingError, curren
   }
 
   /* =========================================================
-     4. HOTEL CARD
+     4a. CATALOGUE STAY — the hotel included in a package; it has no
+         standalone nightly rate, so it shows and books the package.
+     ========================================================= */
+  if (isHotel && item.package) {
+    const pkg = item.package;
+    return (
+      <motion.div {...cardAnim} className="glass-card rounded-xl p-3 border border-slate-800 hover:border-amber-500/30 transition-colors my-2">
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex items-start gap-3 min-w-0">
+            <div className="w-9 h-9 shrink-0 rounded-lg bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-400">
+              <Hotel className="w-5 h-5" />
+            </div>
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 flex-wrap">
+                <h4 className="text-sm font-bold text-white">{item.name}</h4>
+                {item.rating && (
+                  <span className="text-[10px] text-amber-400 font-bold flex items-center gap-0.5">★ {item.rating}</span>
+                )}
+              </div>
+              <div className="text-xs text-slate-400 mt-0.5">
+                📍 {item.city}{item.state && item.state !== item.city ? `, ${item.state}` : ''}
+                {item.distance_km ? ` · ~${item.distance_km.toLocaleString('en-IN')} km away` : ''}
+              </div>
+              {item.hotel_tier && <div className="text-[11px] text-slate-500 mt-0.5">{item.hotel_tier}</div>}
+            </div>
+          </div>
+          <div className="text-right shrink-0">
+            <div className="text-sm font-extrabold text-amber-400">₹{Number(pkg.price_inr).toLocaleString('en-IN')}</div>
+            <span className="text-[10px] text-slate-400">package · {pkg.nights} nights</span>
+          </div>
+        </div>
+
+        {item.about && <p className="text-xs text-slate-300 mt-2 line-clamp-2 leading-relaxed">{item.about}</p>}
+
+        <div className="mt-2 flex items-center justify-between gap-2">
+          <span className="text-[11px] text-slate-400 min-w-0 truncate">
+            Included in {pkg.title} · {pkg.capacity_people || 2} guests
+          </span>
+          <button
+            onClick={() => checkout(pkg)}
+            className="px-3 py-1.5 shrink-0 bg-amber-600 hover:bg-amber-500 text-white font-semibold text-xs rounded-lg transition-all"
+          >
+            Book package
+          </button>
+        </div>
+      </motion.div>
+    );
+  }
+
+  /* =========================================================
+     4b. HOTEL CARD (live supplier rate)
      ========================================================= */
   if (isHotel) {
     return (

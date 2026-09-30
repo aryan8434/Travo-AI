@@ -1,6 +1,9 @@
 import crypto from 'node:crypto';
 import auth from './auth.js';
-const sessionSecret = crypto.randomBytes(32);
+// A domain-separated shared key keeps guest cookies valid across cold starts.
+const sessionSecret = process.env.JWT_SECRET
+  ? crypto.createHmac('sha256', process.env.JWT_SECRET).update('travo-guest-session-v1').digest()
+  : crypto.randomBytes(32);
 const sign = id => crypto.createHmac('sha256', sessionSecret).update(id).digest('hex');
 
 // Chat IDs supplied in the body never choose another visitor's history.
