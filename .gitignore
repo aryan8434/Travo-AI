@@ -33,3 +33,5 @@ uploads/*
 
 # Local deployment archives contain app source, never credentials.
 .artifacts/
+.vercel/
+.vercel-rag/

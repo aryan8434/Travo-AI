@@ -4,7 +4,8 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 export const EMBED_DIM = 768;
 export const GEMINI_MODEL = process.env.GEMINI_EMBED_MODEL || 'gemini-embedding-001';
-export const INDEX_DIR = process.env.RAG_INDEX_DIR || path.join(path.dirname(fileURLToPath(import.meta.url)), '../vectra_index');
+export const READ_ONLY_INDEX = process.env.RAG_READ_ONLY === '1';
+export const INDEX_DIR = process.env.RAG_INDEX_DIR || path.join(path.dirname(fileURLToPath(import.meta.url)), READ_ONLY_INDEX ? '../.vercel-rag' : '../vectra_index');
 const LOCAL_MODEL = 'local-hash-v2';
 const cachePath = path.join(INDEX_DIR, 'embed_cache_v2.json');
 let cache = {};
@@ -16,7 +17,7 @@ export const degradedEmbeddingCount = () => degraded;
 export const embeddingProvider = () => process.env.EMBEDDING_PROVIDER !== 'local' && (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY) && Date.now() >= unavailableUntil ? 'gemini' : 'local';
 export const embeddingModel = () => embeddingProvider() === 'gemini' ? GEMINI_MODEL : LOCAL_MODEL;
 export function flushEmbedCache() {
-  if (!dirty) return;
+  if (READ_ONLY_INDEX || !dirty) return;
   fs.mkdirSync(INDEX_DIR, { recursive: true });
   fs.writeFileSync(`${cachePath}.tmp`, JSON.stringify(cache));
   fs.renameSync(`${cachePath}.tmp`, cachePath);

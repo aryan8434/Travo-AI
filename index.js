@@ -23,7 +23,7 @@ import auth from "./utils/auth.js";
 import adminAuth from "./utils/adminAuth.js";
 import UserChat from "./models/UserChat.js";
 import path from "path";
-import { fetchRealHotels } from "./providers/hotelProvider.js";
+import { searchHotels } from "./utils/hotelSearch.js";
 import { fetchWeather } from "./providers/weatherProvider.js";
 import {
   retrievePackages,
@@ -56,6 +56,8 @@ import { chatIdentity } from "./utils/chatIdentity.js";
 import crypto from "crypto";
 import mongoose from 'mongoose';
 import { assertProductionConfig } from './utils/productionConfig.js';
+import { READ_ONLY_INDEX } from './utils/embeddings.js';
+import { MongoRateLimitStore } from './utils/mongoRateLimitStore.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -73,9 +75,9 @@ if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) {
    APP + MIDDLEWARE
 ========================================================= */
 const app = express();
-app.set("trust proxy", process.env.TRUST_PROXY || false);
+app.set("trust proxy", process.env.VERCEL === '1' ? 1 : process.env.TRUST_PROXY || false);
 app.use(helmet({ contentSecurityPolicy: { directives: {
-    defaultSrc: ["'self'"], scriptSrc: ["'self'", 'https://checkout.razorpay.com'],
+    defaultSrc: ["'self'"], scriptSrc: ["'self'", 'https://checkout.razorpay.com', 'https://cdn.razorpay.com'],
     styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
     fontSrc: ["'self'", 'https://fonts.gstatic.com', 'data:'],
     imgSrc: ["'self'", 'data:', 'https:'],
@@ -95,6 +97,7 @@ const defaultDevOrigins = [
   "http://127.0.0.1:5000",
 ];
 const allowedOrigins = corsOrigins.length ? corsOrigins : defaultDevOrigins;
+if (process.env.VERCEL === '1' && process.env.VERCEL_URL) allowedOrigins.push(`https://${process.env.VERCEL_URL}`);
 
 app.use(
   cors({
@@ -124,6 +127,7 @@ app.get('/health/ready', (req, res) => {
 
 /* Rate limiters */
 const authLimiter = rateLimit({
+  ...(process.env.VERCEL === '1' ? { store: new MongoRateLimitStore('auth') } : {}),
   windowMs: 15 * 60 * 1000,
   max: 20,
   standardHeaders: true,
@@ -131,6 +135,7 @@ const authLimiter = rateLimit({
   message: { error: "Too many attempts. Please wait a few minutes." },
 });
 const chatLimiter = rateLimit({
+  ...(process.env.VERCEL === '1' ? { store: new MongoRateLimitStore('chat') } : {}),
   windowMs: 60 * 1000,
   max: 40,
   standardHeaders: true,
@@ -141,7 +146,7 @@ const chatLimiter = rateLimit({
     text: "🔌 **API tokens exhausted** — too many requests in a short time. Please wait a moment and try again.",
   },
 });
-const paymentLimiter = rateLimit({ windowMs: 60 * 60 * 1000, max: 30, standardHeaders: true, legacyHeaders: false });
+const paymentLimiter = rateLimit({ ...(process.env.VERCEL === '1' ? { store: new MongoRateLimitStore('payment') } : {}), windowMs: 60 * 60 * 1000, max: 30, standardHeaders: true, legacyHeaders: false });
 
 app.use("/auth", authLimiter, requireDatabase, authRoutes);
 app.use("/user", paymentLimiter, userRoutes);
@@ -152,7 +157,7 @@ app.use("/api", (req, res, next) => {
 });
 
 /* =========================================================
-   MOCK DATA HELPERS (buses / hotels)
+   MOCK DATA HELPERS (buses)
 ========================================================= */
 const busOperators = ["Redbus", "MSRTC", "KSRTC", "Zingbus", "TravelKing", "IntrCity", "SuperFast", "GoldBus"];
 
@@ -190,35 +195,6 @@ function mockBuses(from, to, count = 200) {
     });
   }
   return buses;
-}
-
-function mockHotels(max, targetCity = "Delhi") {
-  const hotels = [
-    { name: "Hotel Watan Residency", price: 1000, rating: 4.1 },
-    { name: "Super Collection O RBS", price: 1000, rating: 4.5 },
-    { name: "Footprint Hostel", price: 1438, rating: 4.7 },
-    { name: "FabHotel Jansi Deluxe", price: 1463, rating: 3.0 },
-    { name: "Garuda Suites", price: 1464, rating: 4.0 },
-    { name: "Hotel Keys Delight", price: 1680, rating: 4.5 },
-    { name: "FabHotel Royal International", price: 2095, rating: 3.6 },
-    { name: "FabHotel Srishoin", price: 2268, rating: 4.7 },
-    { name: "Hotel Vanson Villa", price: 2430, rating: 4.2 },
-    { name: "Cyber Pride", price: 2600, rating: 4.1 },
-    { name: "FabHotel Neelkamal", price: 2900, rating: 4.5 },
-    { name: "Country Inn & Suites", price: 3668, rating: 4.4 },
-    { name: "Hotel Anjushree", price: 4500, rating: 4.6 },
-    { name: "Hotel Shivay", price: 4900, rating: 4.1 },
-    { name: "Deltin Suites Goa", price: 5190, rating: 4.2 },
-    { name: "Radisson Blu New Delhi", price: 6102, rating: 4.4 },
-    { name: "The Lalit New Delhi", price: 8000, rating: 4.0 },
-    { name: "Holiday Inn Chennai", price: 9285, rating: 5.0 },
-    { name: "Oakwood Residence Prestige", price: 9900, rating: 5.0 },
-  ];
-  return hotels
-    .filter((h) => h.price <= max)
-    .sort((a, b) => b.price - a.price)
-    .slice(0, 3)
-    .map((h) => ({ ...h, city: targetCity }));
 }
 
 /* =========================================================
@@ -305,8 +281,9 @@ app.post("/chat", chatLimiter, chatIdentity, async (req, res) => {
       return res.json(payload);
     };
 
+    // The reply belongs to this turn only; mergeIntent keeps booking slots, not text.
     const responseText =
-      intent.message ||
+      rawIntent?.message ||
       "Welcome to TravoAI. I can book hotels, buses, flights or find personalized travel packages.";
 
     const lower = message.toLowerCase();
@@ -339,41 +316,20 @@ app.post("/chat", chatLimiter, chatIdentity, async (req, res) => {
       });
     }
 
-    /* ---------- HOTEL SEARCH ---------- */
+    /* ---------- HOTEL SEARCH (package catalogue via RAG) ---------- */
     if (intent.intent === "hotel_search") {
-      const cityToSearch = intentCity || intent.city || activeCity || "Delhi";
-      if (!intent.budget) {
-        return sendResponse({
-          intent: "hotel_search",
-          type: "hotel",
-          text: `💰 Please tell me your budget for hotels in ${cityToSearch}.`,
-          results: [],
-          activeCity: cityToSearch,
-        });
+      const cityToSearch = intentCity || intent.city || activeCity;
+      if (!cityToSearch && !resolvePackageLocation(message)) {
+        return sendResponse({ intent: "hotel_search", type: "hotel", text: "🏨 Which city or destination should I find stays in?", results: [], activeCity });
       }
-
-      let hotels = await fetchRealHotels(cityToSearch);
-      hotels =
-        hotels.length === 0
-          ? (process.env.NODE_ENV === 'production' ? [] : mockHotels(intent.budget, cityToSearch))
-          : hotels.filter((h) => h.price <= intent.budget).slice(0, 3);
-
-      if (hotels.length === 0) {
-        return sendResponse({
-          intent: "hotel_search",
-          type: "hotel",
-          text: `No verified hotel rates are available under ₹${intent.budget} in ${cityToSearch} right now.`,
-          results: [],
-          activeCity: cityToSearch,
-        });
-      }
-
+      const search = await searchHotels(message, { city: cityToSearch, budget: intent.budget ?? intent.maxPrice ?? intent.budgetMax });
       return sendResponse({
         intent: "hotel_search",
         type: "hotel",
-        text: `🏨 Showing hotels under ₹${intent.budget} in ${cityToSearch}:`,
-        results: hotels,
-        activeCity: cityToSearch,
+        text: search.text,
+        results: search.hotels,
+        sources: search.sources,
+        activeCity: search.location || cityToSearch || activeCity,
       });
     }
 
@@ -666,6 +622,17 @@ app.get('/api/flights', chatLimiter, (req, res) => {
   if (!result.ok) return res.status(400).json({ error: result.error });
   res.json({ ...result, flights: result.flights.map(f => attachQuote(f, 'flight')) });
 });
+app.get('/api/hotels', chatLimiter, async (req, res) => {
+  const { city = '', query = '', budget } = req.query;
+  if (typeof city !== 'string' || typeof query !== 'string' || city.length > 120 || query.length > 500 || !(city.trim() || query.trim())) return res.status(400).json({ error: 'A city or search query is required' });
+  if (budget != null && (!Number.isFinite(Number(budget)) || Number(budget) <= 0)) return res.status(400).json({ error: 'Invalid nightly budget' });
+  try {
+    const result = await searchHotels(query, { city: city || null, budget: budget != null ? Number(budget) : null, limit: 8 });
+    res.json({ success: true, ...result, hotels: result.hotels.map(h => attachQuote(h, 'hotel')) });
+  } catch {
+    res.status(500).json({ error: 'The request could not be completed' });
+  }
+});
 app.get('/api/weather', chatLimiter, async (req, res) => {
   if (typeof req.query.city !== 'string' || req.query.city.length > 120) return res.status(400).json({ error: 'City is required' });
   res.setHeader('Cache-Control', 'public, max-age=300');
@@ -756,6 +723,7 @@ app.post("/api/rag/search", chatLimiter, async (req, res) => {
    ADMIN — RAG ENGINE CONTROL (protected)
 ========================================================= */
 app.post("/api/admin/reindex", authLimiter, adminAuth, async (req, res) => {
+  if (READ_ONLY_INDEX) return res.status(409).json({ error: 'This catalogue is rebuilt during deployment. Update the guides and redeploy to refresh it.' });
   try {
     await syncVectraIndex({ force: req.query.force === "1" });
     const pkgs = loadAllPackages();

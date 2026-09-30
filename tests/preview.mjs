@@ -6,7 +6,7 @@ import path from 'node:path';
 import { MongoMemoryServer } from 'mongodb-memory-server';
 process.env.JWT_SECRET = crypto.randomBytes(48).toString('hex');
 process.env.EMBEDDING_PROVIDER = 'local';
-for (const name of ['GROQ_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY', 'RAZORPAY_KEY_ID', 'RAZORPAY_KEY_SECRET', 'WEATHER_API_KEY', 'MAKCORPS_API_TOKEN']) process.env[name] = '';
+for (const name of ['GROQ_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY', 'RAZORPAY_KEY_ID', 'RAZORPAY_KEY_SECRET', 'WEATHER_API_KEY']) process.env[name] = '';
 process.env.RAG_INDEX_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'travo-preview-index-'));
 process.env.PORT = '5055';
 process.env.CORS_ORIGINS = 'http://127.0.0.1:5055,http://localhost:5055';

@@ -3,7 +3,7 @@ import path from "path";
 import crypto from "crypto";
 import { fileURLToPath } from "url";
 import { LocalIndex } from "vectra";
-import { embedBatch, embedRecords, embeddingProvider, embeddingModel, flushEmbedCache, INDEX_DIR } from "./embeddings.js";
+import { embedBatch, embedRecords, embeddingProvider, embeddingModel, flushEmbedCache, INDEX_DIR, READ_ONLY_INDEX } from "./embeddings.js";
 
 import { parseTravelPreferences } from "./travelPreferences.js";
 import { rankChunks } from "./retrieval.js";
@@ -19,7 +19,7 @@ const vectraFolder = INDEX_DIR;
 
 
 [dataRootDir, packagesSubDir, uploadsDir, vectraFolder].forEach((dir) => {
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  if (!READ_ONLY_INDEX && !fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 });
 
 const index = new LocalIndex(vectraFolder);
@@ -232,6 +232,11 @@ function desiredRecords(pkg) {
 let _syncing = null;
 let lastSynced = '';
 export async function syncVectraIndex({ force = false } = {}) {
+  if (READ_ONLY_INDEX) {
+    if (force) throw new Error('The deployed catalogue is read-only. Update the guides and redeploy to rebuild it.');
+    if (!(await index.isIndexCreated())) throw new Error('The deployment is missing its prebuilt RAG index');
+    return;
+  }
   if (_syncing) { await _syncing; if (!force) return; }
   _syncing = (async () => {
     const sourceKey = newestMtime(packagesSubDir, force);
@@ -262,6 +267,7 @@ export async function syncVectraIndex({ force = false } = {}) {
   try { return await _syncing; } finally { _syncing = null; }
 }
 export function startPackageWatcher() {
+  if (READ_ONLY_INDEX) return () => {};
   syncVectraIndex().catch(err => console.error('RAG sync failed:', err.message));
   const timer = setInterval(() => syncVectraIndex().catch(err => console.error('RAG sync failed:', err.message)), 5000);
   timer.unref(); return () => clearInterval(timer);
@@ -501,6 +507,7 @@ function tally(kind, value, pkgs) {
  * re-index. Used by the content-fill pipeline.
  */
 export async function ingestPackageGuide(packageId, guideText) {
+  if (READ_ONLY_INDEX) throw new Error('The deployed catalogue is read-only. Update the guides and redeploy to rebuild it.');
   if (!packageId || !guideText) throw new Error("packageId and guideText required");
 
   const target = findPackageFile(packagesSubDir, packageId);
@@ -552,6 +559,7 @@ function findPackageFile(dir, packageId) {
    PDF BROCHURE INGESTION
 ================================================================ */
 export async function ingestPdfText(pdfFilename, pdfText) {
+  if (READ_ONLY_INDEX) throw new Error('The deployed catalogue is read-only. Update the guides and redeploy to rebuild it.');
   if (!pdfText || pdfText.trim().length === 0) return 0;
   if (!(await index.isIndexCreated())) await index.createIndex();
 

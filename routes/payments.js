@@ -2,7 +2,7 @@ import express from 'express';
 import crypto from 'node:crypto';
 import mongoose from 'mongoose';
 import Razorpay from 'razorpay';
-import compromisedKeys from '../data/compromised-payment-keys.json' with { type: 'json' };
+import { paymentProductionIssues } from '../utils/productionConfig.js';
 import User from '../models/User.js';
 import auth from '../utils/auth.js';
 import { buildInvoice } from '../utils/invoice.js';
@@ -68,8 +68,10 @@ export async function settlePayment({ orderId, paymentId, userId, client }) {
 
 export function createPaymentRouter({ gateway, keyId = process.env.RAZORPAY_KEY_ID, keySecret = process.env.RAZORPAY_KEY_SECRET, webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET } = {}) {
   const router = express.Router();
-  const exposed = compromisedKeys.includes(crypto.createHash('sha256').update(keyId || '').digest('hex'));
-  const configured = /^rzp_live_[A-Za-z0-9]+$/.test(keyId || '') && Boolean(keySecret) && !exposed;
+  const configured = paymentProductionIssues({
+    RAZORPAY_KEY_ID: keyId, RAZORPAY_KEY_SECRET: keySecret,
+    RAZORPAY_WEBHOOK_SECRET: webhookSecret, JWT_SECRET: process.env.JWT_SECRET,
+  }).length === 0;
   const client = gateway || (configured ? new Razorpay({ key_id: keyId, key_secret: keySecret }) : null);
   // Mounted before express.json(): verification must use the untouched request bytes.
   router.post('/payments/webhook', express.raw({ type: 'application/json', limit: '256kb' }), requireDatabase, async (req, res) => {

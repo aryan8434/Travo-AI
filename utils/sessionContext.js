@@ -47,7 +47,7 @@ async function loadState(sessionId) {
   if (!sessionId) return blank();
 
   const cached = memory.get(sessionId);
-  if (cached) return cached;
+  if (cached && !dbReady()) return cached;
 
   if (dbReady()) {
     try {
