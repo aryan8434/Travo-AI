@@ -7,6 +7,7 @@ import RightSidebar from './components/Sidebar/RightSidebar';
 import LeftDrawer from './components/Sidebar/LeftDrawer';
 import AuthModal from './components/Auth/AuthModal';
 import PaymentBanner from './components/Payment/PaymentBanner';
+import { SHOWN_RESULTS, asksForMore } from './utils/results';
 
 // Pages — lazy so each is a separate chunk, loaded on first navigation
 const FlightsView = lazy(() => import('./components/Pages/FlightsView'));
@@ -217,6 +218,17 @@ export default function App() {
 
     const userMsg = { sender: 'user', text: userText };
     setMessages((prev) => [...prev, userMsg]);
+
+    // "show more" reveals what the last list held back: no new search or AI call.
+    const lastList = [...messages].reverse().find((m) => m.sender === 'bot' && (m.results?.length || 0) > SHOWN_RESULTS && !m.moreShown);
+    if (asksForMore(userText) && lastList) {
+      const more = lastList.results.slice(SHOWN_RESULTS);
+      setMessages((prev) => [
+        ...prev.map((m) => (m === lastList ? { ...m, moreShown: true } : m)),
+        { sender: 'bot', text: `Here are ${more.length} more option${more.length === 1 ? '' : 's'}:`, type: lastList.type, results: more },
+      ]);
+      return;
+    }
     setLoading(true);
 
     if (currentUser?.username) {
@@ -245,7 +257,8 @@ export default function App() {
         intent: data.intent,
         type: data.type,
         results: data.results || [],
-        sources: data.sources || []
+        sources: data.sources || [],
+        curated: data.curated === true
       };
 
       setMessages((prev) => [...prev, botMsg]);

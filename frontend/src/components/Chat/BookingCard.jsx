@@ -1,6 +1,6 @@
 import React from 'react';
 import { motion } from 'framer-motion';
-import { Star, Calendar, Users, MapPin, Bus, Plane, Hotel, Sparkles, CheckCircle2, ArrowRight, ShieldCheck, Lock } from 'lucide-react';
+import { Star, Calendar, Users, MapPin, Bus, Plane, Hotel, Sparkles, CheckCircle2, ShieldCheck, Lock } from 'lucide-react';
 import { initializePayment } from '../../utils/razorpay';
 import { fadeInUp } from '../../lib/motion';
 import { chargeFor, usePaymentConfig } from '../../utils/paymentConfig';
@@ -16,8 +16,20 @@ const cardAnim = {
 function BookingCard({ item, cardType, onBookingComplete, onBookingError, currentUser, onOpenAuthModal }) {
   const paymentConfig = usePaymentConfig();
   if (!item) return null;
-  // Shows 'pay ₹1' on the button when the server confirms bookings for less than their value.
-  const payLabel = (price) => { const charge = chargeFor(Number(price), paymentConfig); return charge < Number(price) ? ' · pay ₹' + charge : ''; };
+  // "Book", with what checkout will take underneath when the server confirms
+  // bookings for less than their value (the ₹1 Razorpay confirmation).
+  const bookAction = ({ price, onClick, className, bookable = true, unavailable }) => {
+    if (!bookable) return <button disabled className={`${className} opacity-60 cursor-not-allowed`}>{unavailable}</button>;
+    const charge = chargeFor(Number(price), paymentConfig);
+    return (
+      <div className="flex flex-col items-end gap-0.5 shrink-0">
+        <button onClick={onClick} className={className}>Book</button>
+        {charge < Number(price) && (
+          <span className="text-[10px] font-medium text-emerald-400 whitespace-nowrap">₹{charge} booking via Razorpay</span>
+        )}
+      </div>
+    );
+  };
 
   const isPackage = cardType === 'package' || item.package_id || item.days;
   const isBus = cardType === 'bus' || item.bus_id || item.operator;
@@ -120,13 +132,11 @@ function BookingCard({ item, cardType, onBookingComplete, onBookingError, curren
             <span className="text-[11px] text-emerald-400 flex items-center gap-1 font-medium">
               <ShieldCheck className="w-3.5 h-3.5" /> Razorpay Standard Checkout
             </span>
-            <button
-              onClick={handleBookNow}
-              className="px-4 py-2 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-semibold text-xs rounded-xl shadow-md shadow-cyan-500/20 flex items-center gap-1.5 transition-all duration-200"
-            >
-              <span>Book Package{payLabel(item.price_inr)}</span>
-              <ArrowRight className="w-3.5 h-3.5" />
-            </button>
+            {bookAction({
+              price: item.price_inr,
+              onClick: handleBookNow,
+              className: 'px-5 py-2 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-semibold text-xs rounded-xl shadow-md shadow-cyan-500/20 transition-all duration-200',
+            })}
           </div>
         </div>
       </motion.div>
@@ -170,13 +180,13 @@ function BookingCard({ item, cardType, onBookingComplete, onBookingError, curren
             </div>
             <span className="text-[10px] text-slate-400">per seat</span>
           </div>
-          <button
-            onClick={handleBookNow}
-            disabled={item.bookable === false}
-            className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs rounded-lg transition-all"
-          >
-            {item.bookable === false ? 'Estimate · booking unavailable' : 'Book Seat'}
-          </button>
+          {bookAction({
+            price: actualPriceInRupees,
+            onClick: handleBookNow,
+            bookable: item.bookable !== false,
+            unavailable: 'Estimate · booking unavailable',
+            className: 'px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs rounded-lg transition-all',
+          })}
         </div>
       </motion.div>
     );
@@ -224,13 +234,13 @@ function BookingCard({ item, cardType, onBookingComplete, onBookingError, curren
             </div>
             <span className="text-[10px] text-slate-400">economy</span>
           </div>
-          <button
-            onClick={handleBookNow}
-            disabled={item.bookable === false}
-            className="px-3 py-1.5 bg-sky-600 hover:bg-sky-500 text-white font-semibold text-xs rounded-lg transition-all"
-          >
-            {item.bookable === false ? 'Estimate · booking unavailable' : 'Book Flight'}
-          </button>
+          {bookAction({
+            price: actualPriceInRupees,
+            onClick: handleBookNow,
+            bookable: item.bookable !== false,
+            unavailable: 'Estimate · booking unavailable',
+            className: 'px-4 py-1.5 bg-sky-600 hover:bg-sky-500 text-white font-semibold text-xs rounded-lg transition-all',
+          })}
         </div>
       </motion.div>
     );
@@ -275,12 +285,11 @@ function BookingCard({ item, cardType, onBookingComplete, onBookingError, curren
           <span className="text-[11px] text-slate-400 min-w-0 truncate">
             Included in {pkg.title} · {pkg.capacity_people || 2} guests
           </span>
-          <button
-            onClick={() => checkout(pkg)}
-            className="px-3 py-1.5 shrink-0 bg-amber-600 hover:bg-amber-500 text-white font-semibold text-xs rounded-lg transition-all"
-          >
-            Book package{payLabel(pkg.price_inr)}
-          </button>
+          {bookAction({
+            price: pkg.price_inr,
+            onClick: () => checkout(pkg),
+            className: 'px-4 py-1.5 bg-amber-600 hover:bg-amber-500 text-white font-semibold text-xs rounded-lg transition-all',
+          })}
         </div>
       </motion.div>
     );

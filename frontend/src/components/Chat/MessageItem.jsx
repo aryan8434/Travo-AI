@@ -7,9 +7,15 @@ import TicketModal from '../Pages/TicketModal';
 import InvoiceCard from '../Payment/InvoiceCard';
 import InvoiceDownloadButton from '../Payment/InvoiceDownloadButton';
 import { useMotion, staggerParent } from '../../lib/motion';
+import { SHOWN_RESULTS } from '../../utils/results';
 
 export default function MessageItem({ message, onBookingComplete, onBookingError, onGoToBookings, currentUser, onOpenAuthModal }) {
   const [showTicketModal, setShowTicketModal] = useState(false);
+  // Long result lists start with the top few; the rest are one click (or "show more") away.
+  const [showAllResults, setShowAllResults] = useState(false);
+  const allResults = message.results || [];
+  const visibleResults = showAllResults ? allResults : allResults.slice(0, SHOWN_RESULTS);
+  const hiddenCount = message.moreShown ? 0 : allResults.length - visibleResults.length;
   const isUser = message.sender === 'user';
   const { fadeInUp } = useMotion();
 
@@ -82,22 +88,41 @@ export default function MessageItem({ message, onBookingComplete, onBookingError
         {!isUser && message.results && message.results.length > 0 && (
           <div className="space-y-2 mt-3">
             <div className="text-[11px] text-cyan-400 font-bold uppercase tracking-wider flex items-center gap-1">
-              <Sparkles className="w-3.5 h-3.5" /> Found {message.results.length} Available Option(s):
+              <Sparkles className="w-3.5 h-3.5" />
+              {message.curated
+                ? `AI's top ${Math.min(SHOWN_RESULTS, message.results.length)} of ${message.results.length} options`
+                : `Found ${message.results.length} option${message.results.length === 1 ? '' : 's'}`}
             </div>
 
             <motion.div className="space-y-2" variants={staggerParent} initial="hidden" animate="show">
-              {message.results.map((item, idx) => (
-                <BookingCard
-                  key={item.id || item.package_id || item.bus_id || item.flight_id || item.hotel_id || idx}
-                  item={item}
-                  cardType={message.type}
-                  onBookingComplete={onBookingComplete}
-                  onBookingError={onBookingError}
-                  currentUser={currentUser}
-                  onOpenAuthModal={onOpenAuthModal}
-                />
+              {visibleResults.map((item, idx) => (
+                <div key={item.id || item.package_id || item.bus_id || item.flight_id || item.hotel_id || idx}>
+                  {item.ai_reason && (
+                    <div className="text-[11px] text-amber-300 flex items-start gap-1 mb-1 px-1">
+                      <Sparkles className="w-3 h-3 mt-0.5 shrink-0 text-amber-400" />
+                      <span><strong>AI pick:</strong> {item.ai_reason}</span>
+                    </div>
+                  )}
+                  <BookingCard
+                    item={item}
+                    cardType={message.type}
+                    onBookingComplete={onBookingComplete}
+                    onBookingError={onBookingError}
+                    currentUser={currentUser}
+                    onOpenAuthModal={onOpenAuthModal}
+                  />
+                </div>
               ))}
             </motion.div>
+
+            {hiddenCount > 0 && (
+              <button
+                onClick={() => setShowAllResults(true)}
+                className="w-full py-2 text-xs font-semibold text-cyan-300 bg-slate-900/60 hover:bg-slate-800 border border-slate-800 hover:border-cyan-500/40 rounded-xl transition-all"
+              >
+                Show {hiddenCount} more option{hiddenCount === 1 ? '' : 's'}
+              </button>
+            )}
           </div>
         )}
       </div>

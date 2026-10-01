@@ -58,7 +58,7 @@ export function renderInvoicePdf(invoice, booking = null) {
       y += 20;
       y = row(doc, 'Item', booking.item_name || booking.name, y);
       y = row(doc, 'Destination', booking.destination || booking.location, y);
-      y = row(doc, 'Duration', booking.details, y);
+      y = row(doc, 'Details', booking.details, y);
       y = row(doc, 'Guests', booking.guests, y);
       y = row(doc, 'Booking ID', booking.booking_id, y);
       y = row(doc, 'Status', booking.status === 'cancelled' ? 'Cancelled' : `Paid - supplier confirmation ${booking.supplier_status || 'pending'}`, y);

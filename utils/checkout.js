@@ -29,19 +29,33 @@ function secret() {
 function bookingData(item, type) {
   const price = Number(item.price_inr ?? item.price ?? item.price_per_night_inr);
   toPaise(price);
+  const name = item.title || item.name
+    || (item.airline && `${item.airline} ${item.flight_number || ''}`.trim())
+    || (item.operator && `${item.operator} bus`)
+    || 'Travel booking';
   return {
     itemId: String(item.package_id || item.id || item.flight_id || item.bus_id || crypto.randomUUID()),
-    name: String(item.title || item.name || item.airline || item.operator || 'Travel booking').slice(0, 160),
+    name: String(name).slice(0, 160),
     type, price,
     location: String(item.destination || item.city || `${item.from} → ${item.to}`).slice(0, 120),
     guests: Number(item.capacity_people) || 1,
-    details: item.days ? `${item.days} days / ${item.nights} nights` : 'Supplier confirmation pending',
+    details: item.days
+      ? `${item.days} days / ${item.nights} nights`
+      : item.estimated
+        ? `Estimated fare${item.time ? `, departs ${item.time}` : ''}. Demo booking: no ticket is issued`
+        : 'Supplier confirmation pending',
+    estimated: item.estimated === true,
   };
 }
 
 export function attachQuote(item, type) {
-  // A computed estimate or rate-comparison result is not supplier inventory.
-  const bookable = !item.estimated && (type === 'package' || item.booking_enabled === true);
+  // A computed estimate is not supplier inventory: it can only be booked while
+  // bookings are confirmed with a capped demo charge (BOOKING_CHARGE_INR), and
+  // the booking says no ticket is issued. At full price it stays unbookable.
+  const cappedCharge = Number.isFinite(bookingCharge(Infinity));
+  const bookable = item.estimated
+    ? cappedCharge && (type === 'flight' || type === 'bus')
+    : type === 'package' || item.booking_enabled === true;
   if (!bookable) return { ...item, bookable: false };
   if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) return item;
   return { ...item, bookable: true, quote: jwt.sign({ ...bookingData(item, type), bookable: true }, secret(), {
@@ -60,9 +74,11 @@ export function resolveBooking(input = {}) {
   try {
     const payload = jwt.verify(input.quote, secret(), { algorithms: ['HS256'], issuer: 'travo-quote', audience: 'travo-checkout' });
     if (payload.bookable !== true) throw httpError(400, 'Supplier booking is not available for this estimate');
-    const { itemId, name, type, price, location, guests, details } = payload;
+    // An estimate quoted under the capped charge must not be charged in full if the cap is removed.
+    if (payload.estimated && !Number.isFinite(bookingCharge(Infinity))) throw httpError(400, 'Supplier booking is not available for this estimate');
+    const { itemId, name, type, price, location, guests, details, estimated } = payload;
     toPaise(price);
-    return { itemId, name, type, price, location, guests, details };
+    return { itemId, name, type, price, location, guests, details, estimated: estimated === true };
   } catch {
     throw httpError(400, 'Quote is invalid or expired. Search again for a fresh quote');
   }

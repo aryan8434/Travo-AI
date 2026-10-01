@@ -37,6 +37,16 @@ export function listAirports() {
   return loadAirports().map(({ city, name, iata }) => ({ city, name, iata }));
 }
 
+// Every place name the airport data can resolve: cities, aliases and the
+// towns mapped to a nearby airport. Used to autocorrect typed place names.
+export function knownAirportPlaces() {
+  const titleCase = (s) => s.replace(/\b\w/g, (c) => c.toUpperCase());
+  return [
+    ...loadAirports().flatMap((a) => [a.city, ...(a.aliases || []).map(titleCase)]),
+    ...Object.keys(NEAREST_AIRPORT).map(titleCase),
+  ];
+}
+
 export function listAirportCities() {
   return loadAirports()
     .map((a) => a.city)

@@ -35,7 +35,8 @@ export async function initializePayment(item, onSuccess, onError) {
     const price = Number(item.price_inr ?? item.price ?? item.price_per_night_inr);
     // The server decides the charge; this only picks wallet vs gateway and labels checkout.
     const charge = kind === 'booking' ? chargeFor(price, config) : price;
-    if (kind === 'booking' && account.wallet >= charge) {
+    // A ₹1 confirmation always goes through Razorpay; the wallet pays only full-price bookings.
+    if (kind === 'booking' && charge === price && account.wallet >= charge) {
       const { data } = await axios.post('/user/book', { item: selection, requestId: crypto.randomUUID() });
       return success(data);
     }

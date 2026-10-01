@@ -26,6 +26,8 @@ import UserChat from "./models/UserChat.js";
 import path from "path";
 import { searchHotels } from "./utils/hotelSearch.js";
 import { buildBuses } from "./utils/busEngine.js";
+import { autocorrectPlace } from "./utils/placeNames.js";
+import { CURATED_TYPES, curateResults } from "./utils/curator.js";
 import { fetchWeather } from "./providers/weatherProvider.js";
 import {
   retrievePackages,
@@ -53,7 +55,7 @@ import {
 } from "./utils/flightEngine.js";
 import { fileURLToPath } from "url";
 import { createPaymentRouter, requireDatabase } from "./routes/payments.js";
-import { attachQuote } from "./utils/checkout.js";
+import { attachQuote, bookingCharge } from "./utils/checkout.js";
 import { chatIdentity } from "./utils/chatIdentity.js";
 import crypto from "crypto";
 import mongoose from 'mongoose';
@@ -247,6 +249,16 @@ app.post("/chat", chatLimiter, chatIdentity, async (req, res) => {
     // keep the flow (and the route) from the previous turn.
     const previousSlots = await getSlots(sessionId);
     const intent = mergeIntent(previousSlots, namedServiceIntent(message, rawIntent, previousSlots));
+    // Typed place names are corrected against known cities, aliases, destinations
+    // and states ("jaipuir" -> Jaipur) before any search runs; the reply says so.
+    const corrections = [];
+    for (const slot of ["city", "from", "to"]) {
+      const fixed = autocorrectPlace(intent[slot]);
+      if (fixed) {
+        corrections.push(`**${intent[slot]}** → **${fixed}**`);
+        intent[slot] = fixed;
+      }
+    }
     await saveSlots(sessionId, intent);
 
     const intentCity = normalizeCityName(intent?.city);
@@ -255,7 +267,16 @@ app.post("/chat", chatLimiter, chatIdentity, async (req, res) => {
     }
 
     const sendResponse = async (payload) => {
+      if (payload.results?.length > 1 && CURATED_TYPES.has(payload.type)) {
+        const curated = await curateResults(message, payload.results, payload.type);
+        payload.results = curated.results;
+        payload.curated = curated.curated;
+      }
       if (Array.isArray(payload.results)) payload.results = payload.results.map(item => attachQuote(item, payload.type));
+      if (corrections.length && payload.text) {
+        payload.text = `✏️ Autocorrected ${[...new Set(corrections)].join(", ")}.\n\n${payload.text}`;
+        payload.autocorrected = corrections;
+      }
       if (payload?.text) await saveMessage(sessionId, "llm", payload.text);
       return res.json(payload);
     };
@@ -347,7 +368,9 @@ app.post("/chat", chatLimiter, chatIdentity, async (req, res) => {
       return sendResponse({
         intent: "bus",
         type: "bus",
-        text: `🚌 ${summary} Estimated fares by coach type below. Live bus booking isn't connected yet, so these can't be booked.`,
+        text: Number.isFinite(bookingCharge(Infinity))
+          ? `🚌 ${summary} Estimated fares by coach type below. Book any of them for ₹${bookingCharge(Infinity)} via Razorpay; it is a demo booking, so no bus ticket is issued.`
+          : `🚌 ${summary} Estimated fares by coach type below. Live bus booking isn't connected yet, so these can't be booked.`,
         results: buses,
         activeCity,
       });

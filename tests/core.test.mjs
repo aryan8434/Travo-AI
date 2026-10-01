@@ -547,3 +547,56 @@ test('a ₹1 confirmation charge books the full value and refunds only what was 
     assert.equal(res.booking.invoice.balance_amount, p.price_inr - 1);
   } finally { delete process.env.BOOKING_CHARGE_INR; }
 });
+
+test('typed place names are autocorrected without touching real or unknown ones', async () => {
+  const { autocorrectPlace } = await import('../utils/placeNames.js');
+  assert.equal(autocorrectPlace('jaipuir'), 'Jaipur');
+  assert.equal(autocorrectPlace('dehli'), 'Delhi');
+  assert.equal(autocorrectPlace('kolkatta'), 'Kolkata');
+  assert.equal(autocorrectPlace('udiapur'), 'Udaipur');
+  for (const name of ['Jaipur', 'Paris', 'London', 'Goa', 'Pushkar', '', null]) assert.equal(autocorrectPlace(name), null);
+
+  const chat = await request(publicApp).post('/chat').send({ message: 'buses from delhi to jaipuir' }).expect(200);
+  assert.match(chat.body.text, /Autocorrected \*\*jaipuir\*\* → \*\*Jaipur\*\*/i);
+  assert.equal(chat.body.results[0].to, 'Jaipur');
+});
+
+test('the curator reorders real results with reasons and falls back to search order', async () => {
+  const { curateResults } = await import('../utils/curator.js');
+  const results = ['a', 'b', 'c', 'd', 'e'].map((id, i) => ({ id, operator: 'AC Sleeper', time: `2${i}:00`, price: 500 + i }));
+  const picked = await curateResults('overnight', results, 'bus', { generate: async () => JSON.stringify({ picks: [{ id: '3', reason: 'Latest departure' }, { id: '3', reason: 'dup' }, { id: '99', reason: 'not an option' }, { id: '1', reason: 'Cheap' }] }) });
+  assert.equal(picked.curated, true);
+  assert.deepEqual(picked.results.map(r => r.id), ['d', 'b', 'a', 'c', 'e']);
+  assert.equal(picked.results[0].ai_reason, 'Latest departure');
+  assert.equal(picked.results[0].price, 503, 'prices come from search, never the model');
+
+  for (const generate of [async () => 'not json', async () => { throw new Error('503'); }, async () => JSON.stringify({ picks: [] }), () => null]) {
+    const fallback = await curateResults('overnight', results, 'bus', { generate });
+    assert.equal(fallback.curated, false);
+    assert.deepEqual(fallback.results, results);
+  }
+  assert.equal((await curateResults('x', results, 'weather', { generate: async () => assert.fail('not curated') })).curated, false);
+});
+
+test('estimated flights and buses are bookable only under the capped charge', async () => {
+  const { buildBuses } = await import('../utils/busEngine.js');
+  const bus = buildBuses('Delhi', 'Jaipur').buses[0];
+  const flight = buildFlights('Delhi', 'Goa', 1).flights[0];
+  assert.equal(attachQuote(bus, 'bus').bookable, false);
+  assert.equal(attachQuote(flight, 'flight').bookable, false);
+
+  process.env.BOOKING_CHARGE_INR = '1';
+  let quoted;
+  try {
+    quoted = attachQuote(flight, 'flight');
+    assert.equal(quoted.bookable, true);
+    const booking = resolveBooking(quoted);
+    assert.equal(booking.price, flight.price);
+    assert.equal(booking.estimated, true);
+    assert.match(booking.details, /Demo booking: no ticket is issued/);
+    assert.match(booking.name, new RegExp(flight.airline));
+    assert.equal(attachQuote(bus, 'bus').bookable, true);
+  } finally { delete process.env.BOOKING_CHARGE_INR; }
+  // A quote issued under the cap cannot be charged in full once the cap is gone.
+  assert.throws(() => resolveBooking(quoted));
+});
