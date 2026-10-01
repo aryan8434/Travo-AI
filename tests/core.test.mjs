@@ -15,6 +15,8 @@ process.env.EMBEDDING_PROVIDER = 'local';
 process.env.GROQ_API_KEY = '';
 process.env.GEMINI_API_KEY = '';
 process.env.GOOGLE_API_KEY = '';
+// Set before the app loads dotenv, so a developer's .env cannot configure payments in tests.
+for (const name of ['RAZORPAY_MODE', 'RAZORPAY_KEY_ID', 'RAZORPAY_KEY_SECRET', 'RAZORPAY_WEBHOOK_SECRET']) process.env[name] = '';
 process.env.LLM_PROVIDER = 'groq';
 process.env.RAG_INDEX_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'travo-test-index-'));
 const { app: publicApp } = await import('../index.js');
