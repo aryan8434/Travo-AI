@@ -59,6 +59,25 @@ export default function App() {
   const [transactions, setTransactions] = useState([]);
   const [bookings, setBookings] = useState([]);
 
+  // A saved sign-in expires after a day, and a new server signing secret
+  // invalidates it early. Any 401 on a signed-in request signs the visitor out
+  // and says so, instead of leaving every call failing behind a stale token.
+  useEffect(() => {
+    const id = axios.interceptors.response.use(undefined, (error) => {
+      const headers = error.config?.headers;
+      const sentToken = headers?.get?.('Authorization') ?? headers?.Authorization;
+      if (error.response?.status === 401 && sentToken && sentToken === axios.defaults.headers.common.Authorization) {
+        clearAccount(); setWalletBalance(0); setBookings([]); setTransactions([]);
+        setCurrentUser(null);
+        localStorage.removeItem('travoai_user');
+        delete axios.defaults.headers.common.Authorization;
+        setMessages((prev) => [...prev, { sender: 'bot', text: '🔒 **Your sign-in expired**, so you have been signed out. Sign in again to book or see your bookings; chat keeps working as a guest.' }]);
+      }
+      return Promise.reject(error);
+    });
+    return () => axios.interceptors.response.eject(id);
+  }, []);
+
   // Refresh the authenticated server account whenever navigation changes
   useEffect(() => {
     let active = true;
@@ -205,11 +224,15 @@ export default function App() {
     }
 
     try {
-      const response = await axios.post('/chat', {
-        message: userText,
-        sessionId: sessionId,
-        userCity: activeCity
-      });
+      const ask = () => axios.post('/chat', { message: userText, sessionId, userCity: activeCity });
+      let response;
+      try {
+        response = await ask();
+      } catch (err) {
+        // The interceptor has signed out the stale session; answer as a guest.
+        if (err.response?.status !== 401) throw err;
+        response = await ask();
+      }
 
       const data = response.data;
       if (data.activeCity) {
@@ -234,15 +257,17 @@ export default function App() {
       console.error('Chat error:', error);
       const status = error.response?.status;
 
-      // The server sends its own quota-style message for 429/503; only fall
-      // back to a generic line when it could not be reached at all.
+      // Prefer the server's own message; otherwise describe what actually failed.
+      // (An exhausted AI quota never reaches here: chat falls back to keyword intent.)
       const text =
         error.response?.data?.text ||
         (status === 429
-          ? "🔌 **API tokens exhausted** — too many requests in a short time. Please wait a moment and try again."
-          : status
-            ? "🔌 **API tokens exhausted** — the AI service quota for this session has run out. Please try again in a few minutes."
-            : "📡 **Can't reach the TravoAI server.** Make sure the backend is running (`npm start`), then try again.");
+          ? "⏳ **Too many requests** in a short time. Please wait a minute and try again."
+          : status === 401
+            ? "🔒 Please sign in again, then retry."
+            : status
+              ? "⚠️ **Something went wrong on our side.** Please try again in a moment."
+              : "📡 **Can't reach the TravoAI server.** Check your connection and try again.");
 
       setMessages((prev) => [...prev, { sender: 'bot', text }]);
     } finally {

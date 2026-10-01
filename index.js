@@ -145,7 +145,7 @@ const chatLimiter = rateLimit({
   message: {
     intent: "error",
     error: true,
-    text: "🔌 **API tokens exhausted** — too many requests in a short time. Please wait a moment and try again.",
+    text: "⏳ **Too many requests** in a short time. Please wait a minute and try again.",
   },
 });
 const paymentLimiter = rateLimit({ ...(process.env.VERCEL === '1' ? { store: new MongoRateLimitStore('payment') } : {}), windowMs: 60 * 60 * 1000, max: 30, standardHeaders: true, legacyHeaders: false });
@@ -537,7 +537,7 @@ app.post("/chat", chatLimiter, chatIdentity, async (req, res) => {
     res.status(503).json({
       intent: "error",
       error: true,
-      text: "🔌 **API tokens exhausted** — the AI service quota for this session has run out. Please try again in a few minutes.",
+      text: "⚠️ **Something went wrong on our side.** Please try again in a moment.",
     });
   }
 });
