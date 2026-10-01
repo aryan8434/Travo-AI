@@ -5,6 +5,7 @@ import ReactMarkdown from 'react-markdown';
 import BookingCard from './BookingCard';
 import TicketModal from '../Pages/TicketModal';
 import InvoiceCard from '../Payment/InvoiceCard';
+import InvoiceDownloadButton from '../Payment/InvoiceDownloadButton';
 import { useMotion, staggerParent } from '../../lib/motion';
 
 export default function MessageItem({ message, onBookingComplete, onBookingError, onGoToBookings, currentUser, onOpenAuthModal }) {
@@ -63,6 +64,8 @@ export default function MessageItem({ message, onBookingComplete, onBookingError
                 <Eye className="w-4 h-4" />
                 <span>View Ticket &amp; Invoice</span>
               </button>
+
+              <InvoiceDownloadButton invoiceNo={(message.invoice || message.booking?.invoice)?.invoice_no} />
             </div>
           )}
 

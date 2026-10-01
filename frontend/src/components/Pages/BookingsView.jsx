@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
-import { BookmarkCheck, CheckCircle2, XCircle, Download, Eye, Calendar, Users, MapPin, ArrowLeft, ShieldCheck, QrCode } from 'lucide-react';
+import { BookmarkCheck, CheckCircle2, XCircle, Eye, Calendar, Users, MapPin, ArrowLeft, ShieldCheck, QrCode } from 'lucide-react';
 import TicketModal from './TicketModal';
+import InvoiceDownloadButton from '../Payment/InvoiceDownloadButton';
 
 export default function BookingsView({ bookings, onBackToHome }) {
   const [activeTab, setActiveTab] = useState('SUCCESS'); // 'SUCCESS' | 'FAILED'
@@ -122,11 +123,15 @@ export default function BookingsView({ bookings, onBackToHome }) {
                   <div className="text-base font-extrabold text-cyan-400">
                     ₹{Number(b.actual_price || 0).toLocaleString('en-IN')}
                   </div>
-                  <span className="text-[10px] text-slate-400">Total Price</span>
+                  <span className="text-[10px] text-slate-400">
+                    {b.charged_amount != null && Number(b.charged_amount) < Number(b.actual_price)
+                      ? `Booking value · paid ₹${Number(b.charged_amount).toLocaleString('en-IN')}`
+                      : 'Total Price'}
+                  </span>
                 </div>
 
-                {b.status === 'CONFIRMED' && (
-                  <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-wrap justify-end">
+                  {b.status === 'CONFIRMED' && (
                     <button
                       onClick={() => setSelectedTicket(b)}
                       className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold text-xs rounded-xl border border-slate-700 flex items-center gap-1 transition-all"
@@ -134,16 +139,9 @@ export default function BookingsView({ bookings, onBackToHome }) {
                       <Eye className="w-3.5 h-3.5 text-cyan-400" />
                       <span>View Ticket</span>
                     </button>
-
-                    <button
-                      onClick={() => setSelectedTicket(b)}
-                      className="px-3 py-1.5 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-bold text-xs rounded-xl shadow-md flex items-center gap-1 transition-all"
-                    >
-                      <Download className="w-3.5 h-3.5" />
-                      <span>Download</span>
-                    </button>
-                  </div>
-                )}
+                  )}
+                  <InvoiceDownloadButton invoiceNo={b.invoice?.invoice_no} label="Invoice PDF" compact />
+                </div>
               </div>
             </div>
           ))}

@@ -3,6 +3,7 @@ import { motion } from 'framer-motion';
 import { Star, Calendar, Users, MapPin, Bus, Plane, Hotel, Sparkles, CheckCircle2, ArrowRight, ShieldCheck, Lock } from 'lucide-react';
 import { initializePayment } from '../../utils/razorpay';
 import { fadeInUp } from '../../lib/motion';
+import { chargeFor, usePaymentConfig } from '../../utils/paymentConfig';
 
 const cardAnim = {
   variants: fadeInUp,
@@ -13,7 +14,10 @@ const cardAnim = {
 };
 
 function BookingCard({ item, cardType, onBookingComplete, onBookingError, currentUser, onOpenAuthModal }) {
+  const paymentConfig = usePaymentConfig();
   if (!item) return null;
+  // Shows 'pay ₹1' on the button when the server confirms bookings for less than their value.
+  const payLabel = (price) => { const charge = chargeFor(Number(price), paymentConfig); return charge < Number(price) ? ' · pay ₹' + charge : ''; };
 
   const isPackage = cardType === 'package' || item.package_id || item.days;
   const isBus = cardType === 'bus' || item.bus_id || item.operator;
@@ -120,7 +124,7 @@ function BookingCard({ item, cardType, onBookingComplete, onBookingError, curren
               onClick={handleBookNow}
               className="px-4 py-2 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-semibold text-xs rounded-xl shadow-md shadow-cyan-500/20 flex items-center gap-1.5 transition-all duration-200"
             >
-              <span>Book Package</span>
+              <span>Book Package{payLabel(item.price_inr)}</span>
               <ArrowRight className="w-3.5 h-3.5" />
             </button>
           </div>
@@ -275,7 +279,7 @@ function BookingCard({ item, cardType, onBookingComplete, onBookingError, curren
             onClick={() => checkout(pkg)}
             className="px-3 py-1.5 shrink-0 bg-amber-600 hover:bg-amber-500 text-white font-semibold text-xs rounded-lg transition-all"
           >
-            Book package
+            Book package{payLabel(pkg.price_inr)}
           </button>
         </div>
       </motion.div>

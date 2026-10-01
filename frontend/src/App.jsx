@@ -6,7 +6,7 @@ import ChatBox from './components/Chat/ChatBox';
 import RightSidebar from './components/Sidebar/RightSidebar';
 import LeftDrawer from './components/Sidebar/LeftDrawer';
 import AuthModal from './components/Auth/AuthModal';
-import TestModeBanner from './components/Payment/TestModeBanner';
+import PaymentBanner from './components/Payment/PaymentBanner';
 
 // Pages — lazy so each is a separate chunk, loaded on first navigation
 const FlightsView = lazy(() => import('./components/Pages/FlightsView'));
@@ -118,10 +118,14 @@ export default function App() {
 
     const isWallet = booking.paid_via_wallet;
     const nominal = Number(booking.nominal_amount ?? booking.actual_price);
+    const charged = Number(booking.charged_amount ?? nominal);
+    const balance = Math.max(0, Math.round((nominal - charged) * 100) / 100);
+    const inr = (n) => `₹${n.toLocaleString('en-IN')}`;
     const headerTitle = isWallet ? "🎉 **Payment Received — paid from TravoAI Wallet**" : "🎉 **Booking Confirmed**";
+    const balanceLine = balance > 0 ? `\n* **Not collected online**: ${inr(balance)}` : '';
     const paymentLine = isWallet
-      ? `* **Paid from Wallet**: ₹${nominal.toLocaleString('en-IN')}\n* **Remaining Balance**: ₹${Number(booking.remaining_wallet_balance || 0).toLocaleString('en-IN')}`
-      : `* **Invoice Total**: ₹${nominal.toLocaleString('en-IN')}\n* **Charged via Razorpay now**: ₹${nominal.toLocaleString('en-IN')}`;
+      ? `* **Booking value**: ${inr(nominal)}\n* **Paid from Wallet**: ${inr(charged)}${balanceLine}\n* **Remaining Wallet Balance**: ${inr(Number(booking.remaining_wallet_balance || 0))}`
+      : `* **Booking value**: ${inr(nominal)}\n* **Paid via Razorpay**: ${inr(charged)}${balanceLine}`;
 
     const invoiceLine = booking.invoice
       ? `\n* **Invoice No.**: \`${booking.invoice.invoice_no}\``
@@ -129,7 +133,7 @@ export default function App() {
 
     const botMsg = {
       sender: 'bot',
-      text: `${headerTitle}\n\n* **Item**: ${booking.item_name}\n* **PNR Number**: \`${booking.pnr}\`\n* **Ticket Number**: \`${booking.ticket_number}\`\n* **Booking ID**: \`${booking.booking_id}\`\n* **Transaction ID**: \`${booking.txn_id || 'TXN-CONFIRMED'}\`${invoiceLine}\n${paymentLine}\n\nYour payment receipt is ready. Supplier confirmation is pending — open them from the card below or under **My Bookings**.`,
+      text: `${headerTitle}\n\n* **Item**: ${booking.item_name}\n* **PNR Number**: \`${booking.pnr}\`\n* **Ticket Number**: \`${booking.ticket_number}\`\n* **Booking ID**: \`${booking.booking_id}\`\n* **Transaction ID**: \`${booking.txn_id || 'TXN-CONFIRMED'}\`${invoiceLine}\n${paymentLine}\n\nYour invoice is ready: download the PDF below, or any time from **My Bookings**. Supplier confirmation is pending.`,
       booking: booking,
       invoice: booking.invoice || null,
     };
@@ -261,7 +265,7 @@ export default function App() {
         onLogout={handleLogout}
         onOpenRagModal={() => setIsRagModalOpen(true)}
       />
-      <TestModeBanner />
+      <PaymentBanner />
 
       {/* Sliding YouTube-style Left Navigation Drawer */}
       <LeftDrawer

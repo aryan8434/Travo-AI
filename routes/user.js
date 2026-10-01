@@ -4,7 +4,7 @@ import User from '../models/User.js';
 import auth from '../utils/auth.js';
 import { buildInvoice } from '../utils/invoice.js';
 import { renderInvoicePdf } from '../utils/invoicePdf.js';
-import { resolveBooking, httpError } from '../utils/checkout.js';
+import { resolveBooking, httpError, bookingCharge } from '../utils/checkout.js';
 import { createBookingRecord, requireDatabase, requireVerifiedLedger } from './payments.js';
 
 const router = express.Router();
@@ -20,11 +20,12 @@ router.post('/book', requireVerifiedLedger, async (req, res) => {
   if (typeof requestId !== 'string' || !/^[a-f0-9-]{36}$/i.test(requestId)) throw httpError(400, 'A UUID requestId is required');
   const priced = resolveBooking(req.body?.item);
   const orderId = `wallet_${requestId}`;
-  const invoice = buildInvoice({ nominalAmount: priced.price, description: priced.name, orderId, customer: req.username, gateway: 'TravoAI Wallet' });
-  const booking = { ...createBookingRecord(priced, orderId, invoice), paid_via_wallet: true };
-  const updated = await User.findOneAndUpdate({ _id: req.userId, ledgerVersion: 2, paymentReviewRequired: { $ne: true }, wallet: { $gte: priced.price }, 'bookings.orderId': { $ne: orderId } }, {
-    $inc: { wallet: -priced.price },
-    $push: { bookings: booking, walletHistory: { type: 'booking_charge', amount: -priced.price, description: priced.name, orderId, invoice, createdAt: new Date() } },
+  const charge = bookingCharge(priced.price);
+  const invoice = buildInvoice({ nominalAmount: priced.price, chargedAmount: charge, description: priced.name, orderId, customer: req.username, gateway: 'TravoAI Wallet' });
+  const booking = { ...createBookingRecord(priced, orderId, invoice, '', charge), paid_via_wallet: true };
+  const updated = await User.findOneAndUpdate({ _id: req.userId, ledgerVersion: 2, paymentReviewRequired: { $ne: true }, wallet: { $gte: charge }, 'bookings.orderId': { $ne: orderId } }, {
+    $inc: { wallet: -charge },
+    $push: { bookings: booking, walletHistory: { type: 'booking_charge', amount: -charge, description: priced.name, orderId, invoice, createdAt: new Date() } },
   }, { returnDocument: 'after' }).select('wallet');
   if (!updated) {
     const existing = await User.findById(req.userId).select('wallet bookings');
@@ -65,8 +66,11 @@ router.post('/bookings/cancel', requireVerifiedLedger, async (req, res) => {
   if (booking.status !== 'success') throw httpError(409, 'Only successful bookings can be cancelled');
   const hours = (Date.now() - new Date(booking.createdAt).getTime()) / 3_600_000;
   const feePercent = hours <= 4 ? 20 : hours <= 12 ? 60 : 100;
-  const feeAmount = Math.round(booking.price * feePercent) / 100;
-  const refundAmount = Math.round((booking.price - feeAmount) * 100) / 100;
+  // Refund from what was actually paid, never the booking value: a booking
+  // confirmed with a ₹1 charge must not refund a share of its full price.
+  const paid = Number(booking.charged_amount ?? booking.price);
+  const feeAmount = Math.round(paid * feePercent) / 100;
+  const refundAmount = Math.round((paid - feeAmount) * 100) / 100;
   const cancellation = { cancelledAt: new Date(), feePercent, feeAmount, refundAmount };
   const updated = await User.findOneAndUpdate({ _id: req.userId, ledgerVersion: 2, paymentReviewRequired: { $ne: true }, bookings: { $elemMatch: { orderId, status: 'success' } } }, {
     $set: { 'bookings.$.status': 'cancelled', 'bookings.$.cancellation': cancellation },

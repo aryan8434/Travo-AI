@@ -78,6 +78,7 @@ export function renderInvoicePdf(invoice, booking = null) {
     y += 10;
     y = row(doc, 'Total', money(invoice.nominal_amount), y, { bold: true });
     y = row(doc, `Charged via ${clean(invoice.gateway)}`, money(invoice.amount_charged), y);
+    if (invoice.balance_amount > 0) y = row(doc, 'Balance (not collected online)', money(invoice.balance_amount), y);
     y += 8;
 
     doc.font('Helvetica-Bold').fontSize(10).fillColor(INK).text('Payment reference', 50, y);

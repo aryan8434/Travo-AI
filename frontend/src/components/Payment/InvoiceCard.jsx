@@ -25,6 +25,7 @@ export default function InvoiceCard({ invoice, compact = false }) {
     payment_id,
     gateway = 'Razorpay',
     test_mode,
+    balance_amount = 0,
   } = invoice;
 
   const handleDownload = async () => {
@@ -77,6 +78,13 @@ export default function InvoiceCard({ invoice, compact = false }) {
           <span className="text-slate-400">Charged via {gateway} now</span>
           <span className="font-mono font-bold text-emerald-400">{rupees(amount_charged)}</span>
         </div>
+
+        {balance_amount > 0 && (
+          <div className="flex items-center justify-between">
+            <span className="text-slate-400">Balance (not collected online)</span>
+            <span className="font-mono text-slate-300">{rupees(balance_amount)}</span>
+          </div>
+        )}
 
         {!compact && (
           <p className="text-[10px] text-slate-500 pt-2 border-t border-slate-800 leading-relaxed">

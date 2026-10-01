@@ -36,6 +36,9 @@ Set these in Vercel for the environment being deployed:
   shows visitors Razorpay's test card and UPI details.
 - `RAZORPAY_KEY_ID` and `RAZORPAY_KEY_SECRET`: a key pair matching the mode. Live mode
   needs fresh live credentials; the previously exposed key is rejected in either mode.
+- `BOOKING_CHARGE_INR` (optional): confirm every booking for at most this many rupees,
+  e.g. `1`. Bookings and receipts keep the full value and show the balance not
+  collected online; cancellation refunds are calculated from the amount paid.
 - `RAZORPAY_WEBHOOK_SECRET`: a separate random secret of at least 32 characters.
   Required in live mode; optional in test mode, where browser verification settles
   payments on its own.

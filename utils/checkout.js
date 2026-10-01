@@ -13,6 +13,14 @@ export function toPaise(value) {
   return Math.round(value * 100);
 }
 
+// BOOKING_CHARGE_INR caps what confirming a booking collects now (1 makes every
+// booking a ₹1 confirmation charge). The booking and receipt still carry the
+// full value. Unset or invalid means the full price is charged.
+export function bookingCharge(price, cap = process.env.BOOKING_CHARGE_INR) {
+  const limit = Number(cap);
+  return cap != null && cap !== '' && Number.isFinite(limit) && limit >= 1 ? Math.min(price, limit) : price;
+}
+
 function secret() {
   if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) throw httpError(503, 'Checkout is not configured');
   return process.env.JWT_SECRET;

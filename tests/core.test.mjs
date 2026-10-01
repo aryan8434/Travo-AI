@@ -16,7 +16,7 @@ process.env.GROQ_API_KEY = '';
 process.env.GEMINI_API_KEY = '';
 process.env.GOOGLE_API_KEY = '';
 // Set before the app loads dotenv, so a developer's .env cannot configure payments in tests.
-for (const name of ['RAZORPAY_MODE', 'RAZORPAY_KEY_ID', 'RAZORPAY_KEY_SECRET', 'RAZORPAY_WEBHOOK_SECRET']) process.env[name] = '';
+for (const name of ['RAZORPAY_MODE', 'RAZORPAY_KEY_ID', 'RAZORPAY_KEY_SECRET', 'RAZORPAY_WEBHOOK_SECRET', 'BOOKING_CHARGE_INR']) process.env[name] = '';
 process.env.LLM_PROVIDER = 'groq';
 process.env.RAG_INDEX_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'travo-test-index-'));
 const { app: publicApp } = await import('../index.js');
@@ -428,8 +428,8 @@ test('test mode takes only rzp_test_ keys, needs no webhook and labels receipts'
   testApp.use(express.json());
   testApp.use(createPaymentRouter({ gateway, keyId: 'rzp_test_fixture', keySecret, mode: 'test' }));
   testApp.use(sendErrors);
-  assert.deepEqual((await request(testApp).get('/payments/config').expect(200)).body, { enabled: true, mode: 'test' });
-  assert.deepEqual((await request(app).get('/api/payments/config').expect(200)).body, { enabled: true, mode: 'live' });
+  assert.deepEqual((await request(testApp).get('/payments/config').expect(200)).body, { enabled: true, mode: 'test', booking_charge: null });
+  assert.deepEqual((await request(app).get('/api/payments/config').expect(200)).body, { enabled: true, mode: 'live', booking_charge: null });
   await request(testApp).post('/payments/webhook').send({}).expect(503);
 
   const order = (await request(testApp).post('/create-order').set('Authorization', bearer()).send({ kind: 'wallet', amount: 500 }).expect(200)).body;
@@ -507,4 +507,43 @@ test('a service named mid-flow switches flows even when the model answers "gener
   assert.equal(namedServiceIntent('buses', { intent: 'general' }, previous).intent, 'general');
   assert.equal(namedServiceIntent('weather for my flight', { intent: 'general' }, previous).intent, 'general');
   assert.equal(namedServiceIntent('hotel near goa beach', { intent: 'trip_plan' }, previous).intent, 'trip_plan');
+});
+
+test('a ₹1 confirmation charge books the full value and refunds only what was paid', async () => {
+  const { bookingCharge } = await import('../utils/checkout.js');
+  assert.equal(bookingCharge(53000, '1'), 1);
+  assert.equal(bookingCharge(0.5 + 0.5, '5'), 1);
+  for (const cap of [undefined, '', 'abc', '0', '-3']) assert.equal(bookingCharge(53000, cap), 53000);
+
+  const capApp = express();
+  capApp.use(express.json());
+  capApp.use(createPaymentRouter({ gateway, keyId: 'rzp_live_fixture', keySecret, webhookSecret, bookingChargeInr: '1' }));
+  capApp.use('/user', userRoutes);
+  capApp.use(sendErrors);
+  assert.equal((await request(capApp).get('/payments/config').expect(200)).body.booking_charge, 1);
+
+  const p = loadAllPackages().find(pkg => pkg.price_inr > 1000);
+  const order = (await request(capApp).post('/create-order').set('Authorization', bearer()).send({ kind: 'booking', item: { package_id: p.package_id } }).expect(200)).body;
+  assert.equal(order.amount, 100);
+  const settled = (await request(capApp).post('/verify-payment').set('Authorization', bearer()).send(proof(order)).expect(200)).body;
+  assert.equal(settled.booking.nominal_amount, p.price_inr);
+  assert.equal(settled.booking.charged_amount, 1);
+  assert.equal(settled.invoice.nominal_amount, p.price_inr);
+  assert.equal(settled.invoice.amount_charged, 1);
+  assert.equal(settled.invoice.balance_amount, p.price_inr - 1);
+  assert.match(settled.invoice.settlement_note, /₹1 paid via Razorpay as a booking confirmation charge/);
+
+  const walletBefore = (await User.findById(user._id)).wallet;
+  const cancel = (await request(capApp).post('/user/bookings/cancel').set('Authorization', bearer()).send({ orderId: order.order_id }).expect(200)).body;
+  assert.ok(cancel.refundAmount <= 1, 'refund is a share of the ₹1 paid, not the booking value');
+  assert.equal((await User.findById(user._id)).wallet, Math.round((walletBefore + cancel.refundAmount) * 100) / 100);
+
+  process.env.BOOKING_CHARGE_INR = '1';
+  try {
+    await User.updateOne({ _id: user._id }, { $set: { wallet: 5 } });
+    const res = (await request(capApp).post('/user/book').set('Authorization', bearer()).send({ item: { package_id: p.package_id }, requestId: crypto.randomUUID() }).expect(200)).body;
+    assert.equal(res.wallet, 4);
+    assert.equal(res.booking.charged_amount, 1);
+    assert.equal(res.booking.invoice.balance_amount, p.price_inr - 1);
+  } finally { delete process.env.BOOKING_CHARGE_INR; }
 });
