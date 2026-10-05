@@ -15,6 +15,8 @@ process.env.EMBEDDING_PROVIDER = 'local';
 process.env.GROQ_API_KEY = '';
 process.env.GEMINI_API_KEY = '';
 process.env.GOOGLE_API_KEY = '';
+// Set before the app loads dotenv, so a developer's .env cannot configure payments in tests.
+for (const name of ['RAZORPAY_MODE', 'RAZORPAY_KEY_ID', 'RAZORPAY_KEY_SECRET', 'RAZORPAY_WEBHOOK_SECRET', 'BOOKING_CHARGE_INR']) process.env[name] = '';
 process.env.LLM_PROVIDER = 'groq';
 process.env.RAG_INDEX_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'travo-test-index-'));
 const { app: publicApp } = await import('../index.js');
@@ -410,4 +412,191 @@ test('hotel API and chat return catalogue stays', async () => {
   const chat = await request(publicApp).post('/chat').send({ message: 'hotels in goa' }).expect(200);
   assert.equal(chat.body.type, 'hotel');
   assert.ok(chat.body.results.length > 0 && chat.body.results.every(h => h.city === 'Goa'));
+});
+
+const sendErrors = (err, req, res, next) => res.status(err.status || 500).json({ error: err.message });
+const binary = (res, done) => { const chunks = []; res.on('data', c => chunks.push(c)); res.on('end', () => done(null, Buffer.concat(chunks))); };
+
+test('test mode takes only rzp_test_ keys, needs no webhook and labels receipts', async () => {
+  const { productionIssues } = await import('../utils/productionConfig.js');
+  const base = { JWT_SECRET: 'a'.repeat(48), MONGO_URI: 'mongodb://database/travo', CORS_ORIGINS: 'https://travel.example.com', RAZORPAY_MODE: 'test', RAZORPAY_KEY_SECRET: 'fixture-secret' };
+  assert.deepEqual(productionIssues({ ...base, RAZORPAY_KEY_ID: 'rzp_test_fixture' }), []);
+  assert.ok(productionIssues({ ...base, RAZORPAY_KEY_ID: 'rzp_live_fixture' }).length);
+  assert.ok(productionIssues({ ...base, RAZORPAY_KEY_ID: 'rzp_test_fixture', RAZORPAY_WEBHOOK_SECRET: 'short' }).length);
+
+  const testApp = express();
+  testApp.use(express.json());
+  testApp.use(createPaymentRouter({ gateway, keyId: 'rzp_test_fixture', keySecret, mode: 'test' }));
+  testApp.use(sendErrors);
+  assert.deepEqual((await request(testApp).get('/payments/config').expect(200)).body, { enabled: true, mode: 'test', booking_charge: null });
+  assert.deepEqual((await request(app).get('/api/payments/config').expect(200)).body, { enabled: true, mode: 'live', booking_charge: null });
+  await request(testApp).post('/payments/webhook').send({}).expect(503);
+
+  const order = (await request(testApp).post('/create-order').set('Authorization', bearer()).send({ kind: 'wallet', amount: 500 }).expect(200)).body;
+  assert.equal(order.mode, 'test');
+  assert.equal(order.key_id, 'rzp_test_fixture');
+  process.env.RAZORPAY_MODE = 'test';
+  try {
+    const settled = (await request(testApp).post('/verify-payment').set('Authorization', bearer()).send(proof(order)).expect(200)).body;
+    assert.equal(settled.invoice.test_mode, true);
+    assert.match(settled.invoice.settlement_note, /test mode: no real money/);
+  } finally { delete process.env.RAZORPAY_MODE; }
+});
+
+test('an authorized payment is captured for its exact order before crediting', async () => {
+  const captured = [];
+  const captureGateway = { ...gateway, payments: {
+    fetch: async id => payments.get(id),
+    capture: async (id, amount, currency) => { captured.push([id, amount, currency]); payments.set(id, { ...payments.get(id), status: 'captured', captured: true }); return payments.get(id); },
+  } };
+  const captureApp = express();
+  captureApp.use(express.json());
+  captureApp.use(createPaymentRouter({ gateway: captureGateway, keyId: 'rzp_live_fixture', keySecret, webhookSecret }));
+  captureApp.use(sendErrors);
+  const before = (await User.findById(user._id)).wallet;
+  const order = (await request(captureApp).post('/create-order').set('Authorization', bearer()).send({ kind: 'wallet', amount: 700 }).expect(200)).body;
+  const payload = proof(order, { status: 'authorized', captured: false });
+  await request(captureApp).post('/verify-payment').set('Authorization', bearer()).send(payload).expect(200);
+  assert.deepEqual(captured, [[payload.razorpay_payment_id, 70000, 'INR']]);
+  assert.equal((await User.findById(user._id)).wallet, before + 700);
+
+  const mismatched = (await request(captureApp).post('/create-order').set('Authorization', bearer()).send({ kind: 'wallet', amount: 700 }).expect(200)).body;
+  await request(captureApp).post('/verify-payment').set('Authorization', bearer()).send(proof(mismatched, { status: 'authorized', captured: false, amount: 100 })).expect(400);
+  assert.equal(captured.length, 1);
+});
+
+test('invoice PDFs render from stored receipts for their owner only', async () => {
+  const order = await walletOrder(1500);
+  const { invoice } = (await request(app).post('/api/verify-payment').set('Authorization', bearer()).send(proof(order)).expect(200)).body;
+  const pdf = await request(app).get('/user/invoice.pdf').query({ no: invoice.invoice_no }).set('Authorization', bearer()).buffer(true).parse(binary).expect(200);
+  assert.equal(pdf.headers['content-type'], 'application/pdf');
+  assert.match(pdf.headers['content-disposition'], /attachment; filename="TravoAI-TRV-[A-F0-9]{16}\.pdf"/);
+  assert.equal(pdf.body.subarray(0, 5).toString(), '%PDF-');
+  await request(app).get('/user/invoice.pdf').query({ no: invoice.invoice_no }).set('Authorization', `Bearer ${otherToken}`).expect(404);
+  await request(app).get('/user/invoice.pdf').query({ no: '../../etc/passwd' }).set('Authorization', bearer()).expect(400);
+  await request(app).get('/user/invoice.pdf').query({ no: invoice.invoice_no }).expect(401);
+});
+
+test('bus search returns labelled, unbookable distance estimates', async () => {
+  const { buildBuses } = await import('../utils/busEngine.js');
+  const route = buildBuses('Delhi', 'Jaipur');
+  assert.equal(route.ok, true);
+  assert.ok(route.roadKm > 200 && route.roadKm < 400);
+  assert.ok(route.buses.length > 0 && route.buses.every(b => b.estimated === true && b.price === Math.max(100, Math.round(route.roadKm * b.rate_per_km))));
+  assert.ok(route.buses.every(b => attachQuote(b, 'bus').bookable === false));
+  assert.deepEqual(buildBuses('Delhi', 'Jaipur'), route, 'estimates are deterministic');
+  assert.match(buildBuses('Delhi', 'Chennai').error, /too long for a bus/);
+  assert.match(buildBuses('Delhi', 'Atlantis').error, /can't place "Atlantis"/);
+
+  await request(publicApp).get('/api/buses').query({ from: 'Delhi' }).expect(400);
+  const api = await request(publicApp).get('/api/buses').query({ from: 'Delhi', to: 'Jaipur' }).expect(200);
+  assert.ok(api.body.buses.every(b => b.bookable === false));
+  const chat = await request(publicApp).post('/chat').send({ message: 'buses from delhi to jaipur' }).expect(200);
+  assert.equal(chat.body.intent, 'bus');
+  assert.ok(chat.body.results.length > 0 && chat.body.results.every(b => b.bookable === false));
+});
+
+test('a service named mid-flow switches flows even when the model answers "general"', async () => {
+  const { namedServiceIntent, mergeIntent } = await import('../utils/sessionContext.js');
+  const previous = { intent: 'bus', from: 'Delhi' };
+  assert.equal(mergeIntent(previous, namedServiceIntent('flights', { intent: 'general' }, previous)).intent, 'flight');
+  assert.equal(namedServiceIntent('flights', { intent: 'bus' }, previous).intent, 'flight');
+  assert.equal(namedServiceIntent('hotels', { intent: 'general' }, previous).intent, 'hotel_search');
+  // No carried flow, the same flow, two services, or a different specific model intent: unchanged.
+  assert.equal(namedServiceIntent('how long should I stay in Goa?', { intent: 'general' }, {}).intent, 'general');
+  assert.equal(namedServiceIntent('buses', { intent: 'general' }, previous).intent, 'general');
+  assert.equal(namedServiceIntent('weather for my flight', { intent: 'general' }, previous).intent, 'general');
+  assert.equal(namedServiceIntent('hotel near goa beach', { intent: 'trip_plan' }, previous).intent, 'trip_plan');
+});
+
+test('a ₹1 confirmation charge books the full value and refunds only what was paid', async () => {
+  const { bookingCharge } = await import('../utils/checkout.js');
+  assert.equal(bookingCharge(53000, '1'), 1);
+  assert.equal(bookingCharge(0.5 + 0.5, '5'), 1);
+  for (const cap of [undefined, '', 'abc', '0', '-3']) assert.equal(bookingCharge(53000, cap), 53000);
+
+  const capApp = express();
+  capApp.use(express.json());
+  capApp.use(createPaymentRouter({ gateway, keyId: 'rzp_live_fixture', keySecret, webhookSecret, bookingChargeInr: '1' }));
+  capApp.use('/user', userRoutes);
+  capApp.use(sendErrors);
+  assert.equal((await request(capApp).get('/payments/config').expect(200)).body.booking_charge, 1);
+
+  const p = loadAllPackages().find(pkg => pkg.price_inr > 1000);
+  const order = (await request(capApp).post('/create-order').set('Authorization', bearer()).send({ kind: 'booking', item: { package_id: p.package_id } }).expect(200)).body;
+  assert.equal(order.amount, 100);
+  const settled = (await request(capApp).post('/verify-payment').set('Authorization', bearer()).send(proof(order)).expect(200)).body;
+  assert.equal(settled.booking.nominal_amount, p.price_inr);
+  assert.equal(settled.booking.charged_amount, 1);
+  assert.equal(settled.invoice.nominal_amount, p.price_inr);
+  assert.equal(settled.invoice.amount_charged, 1);
+  assert.equal(settled.invoice.balance_amount, p.price_inr - 1);
+  assert.match(settled.invoice.settlement_note, /₹1 paid via Razorpay as a booking confirmation charge/);
+
+  const walletBefore = (await User.findById(user._id)).wallet;
+  const cancel = (await request(capApp).post('/user/bookings/cancel').set('Authorization', bearer()).send({ orderId: order.order_id }).expect(200)).body;
+  assert.ok(cancel.refundAmount <= 1, 'refund is a share of the ₹1 paid, not the booking value');
+  assert.equal((await User.findById(user._id)).wallet, Math.round((walletBefore + cancel.refundAmount) * 100) / 100);
+
+  process.env.BOOKING_CHARGE_INR = '1';
+  try {
+    await User.updateOne({ _id: user._id }, { $set: { wallet: 5 } });
+    const res = (await request(capApp).post('/user/book').set('Authorization', bearer()).send({ item: { package_id: p.package_id }, requestId: crypto.randomUUID() }).expect(200)).body;
+    assert.equal(res.wallet, 4);
+    assert.equal(res.booking.charged_amount, 1);
+    assert.equal(res.booking.invoice.balance_amount, p.price_inr - 1);
+  } finally { delete process.env.BOOKING_CHARGE_INR; }
+});
+
+test('typed place names are autocorrected without touching real or unknown ones', async () => {
+  const { autocorrectPlace } = await import('../utils/placeNames.js');
+  assert.equal(autocorrectPlace('jaipuir'), 'Jaipur');
+  assert.equal(autocorrectPlace('dehli'), 'Delhi');
+  assert.equal(autocorrectPlace('kolkatta'), 'Kolkata');
+  assert.equal(autocorrectPlace('udiapur'), 'Udaipur');
+  for (const name of ['Jaipur', 'Paris', 'London', 'Goa', 'Pushkar', '', null]) assert.equal(autocorrectPlace(name), null);
+
+  const chat = await request(publicApp).post('/chat').send({ message: 'buses from delhi to jaipuir' }).expect(200);
+  assert.match(chat.body.text, /Autocorrected \*\*jaipuir\*\* → \*\*Jaipur\*\*/i);
+  assert.equal(chat.body.results[0].to, 'Jaipur');
+});
+
+test('the curator reorders real results with reasons and falls back to search order', async () => {
+  const { curateResults } = await import('../utils/curator.js');
+  const results = ['a', 'b', 'c', 'd', 'e'].map((id, i) => ({ id, operator: 'AC Sleeper', time: `2${i}:00`, price: 500 + i }));
+  const picked = await curateResults('overnight', results, 'bus', { generate: async () => JSON.stringify({ picks: [{ id: '3', reason: 'Latest departure' }, { id: '3', reason: 'dup' }, { id: '99', reason: 'not an option' }, { id: '1', reason: 'Cheap' }] }) });
+  assert.equal(picked.curated, true);
+  assert.deepEqual(picked.results.map(r => r.id), ['d', 'b', 'a', 'c', 'e']);
+  assert.equal(picked.results[0].ai_reason, 'Latest departure');
+  assert.equal(picked.results[0].price, 503, 'prices come from search, never the model');
+
+  for (const generate of [async () => 'not json', async () => { throw new Error('503'); }, async () => JSON.stringify({ picks: [] }), () => null]) {
+    const fallback = await curateResults('overnight', results, 'bus', { generate });
+    assert.equal(fallback.curated, false);
+    assert.deepEqual(fallback.results, results);
+  }
+  assert.equal((await curateResults('x', results, 'weather', { generate: async () => assert.fail('not curated') })).curated, false);
+});
+
+test('estimated flights and buses are bookable only under the capped charge', async () => {
+  const { buildBuses } = await import('../utils/busEngine.js');
+  const bus = buildBuses('Delhi', 'Jaipur').buses[0];
+  const flight = buildFlights('Delhi', 'Goa', 1).flights[0];
+  assert.equal(attachQuote(bus, 'bus').bookable, false);
+  assert.equal(attachQuote(flight, 'flight').bookable, false);
+
+  process.env.BOOKING_CHARGE_INR = '1';
+  let quoted;
+  try {
+    quoted = attachQuote(flight, 'flight');
+    assert.equal(quoted.bookable, true);
+    const booking = resolveBooking(quoted);
+    assert.equal(booking.price, flight.price);
+    assert.equal(booking.estimated, true);
+    assert.match(booking.details, /Demo booking: no ticket is issued/);
+    assert.match(booking.name, new RegExp(flight.airline));
+    assert.equal(attachQuote(bus, 'bus').bookable, true);
+  } finally { delete process.env.BOOKING_CHARGE_INR; }
+  // A quote issued under the cap cannot be charged in full once the cap is gone.
+  assert.throws(() => resolveBooking(quoted));
 });

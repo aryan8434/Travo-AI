@@ -1,3 +1,4 @@
+import '../utils/vercelRuntime.js'; // must stay first: sets env the modules below read on load
 import { app } from '../index.js';
 import { connectDB } from '../db.js';
 import { assertProductionConfig } from '../utils/productionConfig.js';

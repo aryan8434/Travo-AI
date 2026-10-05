@@ -16,6 +16,7 @@ import {
   getSlots,
   saveSlots,
   mergeIntent,
+  namedServiceIntent,
 } from "./utils/sessionContext.js";
 import authRoutes from "./routes/auth.js";
 import userRoutes from "./routes/user.js";
@@ -24,6 +25,9 @@ import adminAuth from "./utils/adminAuth.js";
 import UserChat from "./models/UserChat.js";
 import path from "path";
 import { searchHotels } from "./utils/hotelSearch.js";
+import { buildBuses } from "./utils/busEngine.js";
+import { autocorrectPlace } from "./utils/placeNames.js";
+import { CURATED_TYPES, curateResults } from "./utils/curator.js";
 import { fetchWeather } from "./providers/weatherProvider.js";
 import {
   retrievePackages,
@@ -51,7 +55,7 @@ import {
 } from "./utils/flightEngine.js";
 import { fileURLToPath } from "url";
 import { createPaymentRouter, requireDatabase } from "./routes/payments.js";
-import { attachQuote } from "./utils/checkout.js";
+import { attachQuote, bookingCharge } from "./utils/checkout.js";
 import { chatIdentity } from "./utils/chatIdentity.js";
 import crypto from "crypto";
 import mongoose from 'mongoose';
@@ -115,7 +119,7 @@ app.use(
 
 const paymentsRouter = createPaymentRouter();
 app.use('/api', (req, res, next) => {
-  if (req.path === '/payments/webhook') return paymentsRouter(req, res, next);
+  if (['/payments/webhook', '/payments/config'].includes(req.path)) return paymentsRouter(req, res, next);
   next();
 });
 app.use(express.json({ limit: "1mb" }));
@@ -143,7 +147,7 @@ const chatLimiter = rateLimit({
   message: {
     intent: "error",
     error: true,
-    text: "🔌 **API tokens exhausted** — too many requests in a short time. Please wait a moment and try again.",
+    text: "⏳ **Too many requests** in a short time. Please wait a minute and try again.",
   },
 });
 const paymentLimiter = rateLimit({ ...(process.env.VERCEL === '1' ? { store: new MongoRateLimitStore('payment') } : {}), windowMs: 60 * 60 * 1000, max: 30, standardHeaders: true, legacyHeaders: false });
@@ -157,16 +161,8 @@ app.use("/api", (req, res, next) => {
 });
 
 /* =========================================================
-   MOCK DATA HELPERS (buses)
+   TIME-OF-DAY FILTER
 ========================================================= */
-const busOperators = ["Redbus", "MSRTC", "KSRTC", "Zingbus", "TravelKing", "IntrCity", "SuperFast", "GoldBus"];
-
-function getRandomTime() {
-  const h = String(Math.floor(Math.random() * 24)).padStart(2, "0");
-  const m = String(Math.floor(Math.random() * 60)).padStart(2, "0");
-  return `${h}:${m}`;
-}
-
 const TIME_SLOTS = {
   morning: { start: 6, end: 12 },
   afternoon: { start: 12, end: 18 },
@@ -180,21 +176,6 @@ function isInTimeSlot(timeStr, pref) {
   const slot = TIME_SLOTS[pref];
   if (!slot) return true;
   return pref === "night" ? hour >= slot.start || hour < slot.end : hour >= slot.start && hour < slot.end;
-}
-
-function mockBuses(from, to, count = 200) {
-  const buses = [];
-  for (let i = 0; i < count; i++) {
-    buses.push({
-      id: `bus-${i}`,
-      operator: busOperators[Math.floor(Math.random() * busOperators.length)],
-      from,
-      to,
-      time: getRandomTime(),
-      price: Math.floor(Math.random() * (5000 - 500)) + 500,
-    });
-  }
-  return buses;
 }
 
 /* =========================================================
@@ -267,7 +248,17 @@ app.post("/chat", chatLimiter, chatIdentity, async (req, res) => {
     // Merge over the slots we remember, so follow-ups like "kolkata" or "5000"
     // keep the flow (and the route) from the previous turn.
     const previousSlots = await getSlots(sessionId);
-    const intent = mergeIntent(previousSlots, rawIntent);
+    const intent = mergeIntent(previousSlots, namedServiceIntent(message, rawIntent, previousSlots));
+    // Typed place names are corrected against known cities, aliases, destinations
+    // and states ("jaipuir" -> Jaipur) before any search runs; the reply says so.
+    const corrections = [];
+    for (const slot of ["city", "from", "to"]) {
+      const fixed = autocorrectPlace(intent[slot]);
+      if (fixed) {
+        corrections.push(`**${intent[slot]}** → **${fixed}**`);
+        intent[slot] = fixed;
+      }
+    }
     await saveSlots(sessionId, intent);
 
     const intentCity = normalizeCityName(intent?.city);
@@ -276,7 +267,16 @@ app.post("/chat", chatLimiter, chatIdentity, async (req, res) => {
     }
 
     const sendResponse = async (payload) => {
+      if (payload.results?.length > 1 && CURATED_TYPES.has(payload.type)) {
+        const curated = await curateResults(message, payload.results, payload.type);
+        payload.results = curated.results;
+        payload.curated = curated.curated;
+      }
       if (Array.isArray(payload.results)) payload.results = payload.results.map(item => attachQuote(item, payload.type));
+      if (corrections.length && payload.text) {
+        payload.text = `✏️ Autocorrected ${[...new Set(corrections)].join(", ")}.\n\n${payload.text}`;
+        payload.autocorrected = corrections;
+      }
       if (payload?.text) await saveMessage(sessionId, "llm", payload.text);
       return res.json(payload);
     };
@@ -333,52 +333,46 @@ app.post("/chat", chatLimiter, chatIdentity, async (req, res) => {
       });
     }
 
-    /* ---------- BUS SEARCH ---------- */
+    /* ---------- BUS SEARCH (distance-based estimates) ---------- */
     if (intent.intent === "bus") {
-      if (process.env.NODE_ENV === 'production') return sendResponse({ intent: 'bus', type: 'bus', text: 'Live bus inventory is not connected yet. No reservable bus seats are available through this app.', results: [], activeCity });
-      const fromCity = intent.from || activeCity || "Delhi";
+      const fromCity = intent.from || activeCity;
       const toCity = intent.to;
-      if (!toCity) {
+      if (!toCity || !fromCity) {
         return sendResponse({
           intent: "bus",
           type: "bus",
-          text: `🚌 Please tell me where you want to travel from ${fromCity} (e.g. "Buses to Jaipur").`,
+          text: !toCity
+            ? `🚌 Where are you travelling to${fromCity ? ` from ${fromCity}` : ""}? (e.g. "Buses to Jaipur")`
+            : `🚌 Which city are you leaving from for ${toCity}?`,
           results: [],
-          activeCity: fromCity,
+          activeCity,
         });
       }
-      if (!intent.minPrice && !intent.maxPrice) {
-        return sendResponse({
-          intent: "bus",
-          type: "bus",
-          text: `💰 Please tell me your budget for bus tickets from ${fromCity} to ${toCity} (e.g., 500 to 3000).`,
-          results: [],
-          activeCity: fromCity,
-        });
-      }
+      const route = buildBuses(fromCity, toCity);
+      if (!route.ok) return sendResponse({ intent: "bus", type: "bus", text: `🚌 ${route.error}`, results: [], activeCity });
 
       const minPrice = intent.minPrice || 0;
-      const maxPrice = intent.maxPrice;
-      const buses = mockBuses(fromCity, toCity, 200).filter(
-        (b) => b.price >= minPrice && b.price <= maxPrice && isInTimeSlot(b.time, intent.timePreference),
-      );
-
+      const maxPrice = intent.maxPrice || Infinity;
+      const buses = route.buses.filter((b) => b.price >= minPrice && b.price <= maxPrice && isInTimeSlot(b.time, intent.timePreference));
+      const fares = route.buses.map((b) => b.price);
+      const summary = `${route.from} → ${route.to} is about **${route.roadKm} km** by road (~${route.duration}).`;
       if (buses.length === 0) {
         return sendResponse({
           intent: "bus",
           type: "bus",
-          text: `😕 No buses found from ${fromCity} to ${toCity} under ₹${maxPrice}.`,
+          text: `😕 ${summary} No estimated fare fits that filter; fares on this route run ₹${Math.min(...fares)}–₹${Math.max(...fares)}.`,
           results: [],
-          activeCity: fromCity,
+          activeCity,
         });
       }
-
       return sendResponse({
         intent: "bus",
         type: "bus",
-        text: `🚌 Available buses from ${fromCity} to ${toCity} (₹${minPrice} - ₹${maxPrice}):`,
-        results: buses.slice(0, 20),
-        activeCity: fromCity,
+        text: Number.isFinite(bookingCharge(Infinity))
+          ? `🚌 ${summary} Estimated fares by coach type below. Book any of them for ₹${bookingCharge(Infinity)} via Razorpay; it is a demo booking, so no bus ticket is issued.`
+          : `🚌 ${summary} Estimated fares by coach type below. Live bus booking isn't connected yet, so these can't be booked.`,
+        results: buses,
+        activeCity,
       });
     }
 
@@ -566,7 +560,7 @@ app.post("/chat", chatLimiter, chatIdentity, async (req, res) => {
     res.status(503).json({
       intent: "error",
       error: true,
-      text: "🔌 **API tokens exhausted** — the AI service quota for this session has run out. Please try again in a few minutes.",
+      text: "⚠️ **Something went wrong on our side.** Please try again in a moment.",
     });
   }
 });
@@ -621,6 +615,12 @@ app.get('/api/flights', chatLimiter, (req, res) => {
   const result = buildFlights(req.query.from, req.query.to, 6);
   if (!result.ok) return res.status(400).json({ error: result.error });
   res.json({ ...result, flights: result.flights.map(f => attachQuote(f, 'flight')) });
+});
+app.get('/api/buses', chatLimiter, (req, res) => {
+  if (typeof req.query.from !== 'string' || typeof req.query.to !== 'string' || req.query.from.length > 80 || req.query.to.length > 80) return res.status(400).json({ error: 'Origin and destination are required' });
+  const route = buildBuses(req.query.from, req.query.to);
+  if (!route.ok) return res.status(400).json({ error: route.error });
+  res.json({ ...route, buses: route.buses.map(b => attachQuote(b, 'bus')) });
 });
 app.get('/api/hotels', chatLimiter, async (req, res) => {
   const { city = '', query = '', budget } = req.query;

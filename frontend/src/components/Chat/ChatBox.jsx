@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Send, Sparkles, Loader2, Compass } from 'lucide-react';
 import MessageItem from './MessageItem';
+import ThinkingStatus from './ThinkingStatus';
 
 export default function ChatBox({ messages, onSendMessage, loading, onBookingComplete, onBookingError, onGoToBookings, currentUser, onOpenAuthModal }) {
   const [input, setInput] = useState('');
@@ -133,7 +134,10 @@ export default function ChatBox({ messages, onSendMessage, loading, onBookingCom
                 <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 typing-dot" style={{ animationDelay: '0.15s' }} />
                 <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 typing-dot" style={{ animationDelay: '0.3s' }} />
               </span>
-              <span>AI is analyzing routes &amp; RAG packages…</span>
+              {(() => {
+                const request = [...messages].reverse().find((m) => m.sender === 'user')?.text || '';
+                return <ThinkingStatus key={request} request={request} />;
+              })()}
             </motion.div>
           )}
         </AnimatePresence>

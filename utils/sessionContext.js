@@ -114,6 +114,24 @@ export async function getSlots(sessionId) {
  *    returned a vague "general" for what is clearly a follow-up).
  *  - Starting a *different* booking flow clears the old route/price slots.
  */
+// A bare "flights" mid-bus-flow often comes back from the model as a clarifying
+// "general" reply, which mergeIntent would treat as "carry on with buses".
+// Exactly one service named in this message outranks a different carried flow.
+const NAMED_SERVICES = [
+  ["flight", /\b(flights?|fly|flying|planes?|airfares?)\b/i],
+  ["bus", /\b(bus|buses|coach(es)?)\b/i],
+  ["hotel_search", /\b(hotels?|homestays?|rooms?|accommodation|resorts?)\b/i],
+  ["weather", /\b(weather|temperature|forecast)\b/i],
+];
+
+export function namedServiceIntent(message = "", intent = {}, previous = {}) {
+  const named = NAMED_SERVICES.filter(([, re]) => re.test(message)).map(([name]) => name);
+  if (named.length !== 1 || !previous.intent || previous.intent === named[0] || intent.intent === named[0]) return intent;
+  // The model chose some other specific service: trust it over keywords.
+  if (intent.intent && intent.intent !== "general" && intent.intent !== previous.intent) return intent;
+  return { ...intent, intent: named[0] };
+}
+
 export function mergeIntent(previous = {}, intent = {}) {
   const incoming = intent || {};
   const prevIntent = previous.intent;

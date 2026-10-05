@@ -6,6 +6,8 @@ import ChatBox from './components/Chat/ChatBox';
 import RightSidebar from './components/Sidebar/RightSidebar';
 import LeftDrawer from './components/Sidebar/LeftDrawer';
 import AuthModal from './components/Auth/AuthModal';
+import PaymentBanner from './components/Payment/PaymentBanner';
+import { SHOWN_RESULTS, asksForMore } from './utils/results';
 
 // Pages — lazy so each is a separate chunk, loaded on first navigation
 const FlightsView = lazy(() => import('./components/Pages/FlightsView'));
@@ -57,6 +59,25 @@ export default function App() {
   // Data lists
   const [transactions, setTransactions] = useState([]);
   const [bookings, setBookings] = useState([]);
+
+  // A saved sign-in expires after a day, and a new server signing secret
+  // invalidates it early. Any 401 on a signed-in request signs the visitor out
+  // and says so, instead of leaving every call failing behind a stale token.
+  useEffect(() => {
+    const id = axios.interceptors.response.use(undefined, (error) => {
+      const headers = error.config?.headers;
+      const sentToken = headers?.get?.('Authorization') ?? headers?.Authorization;
+      if (error.response?.status === 401 && sentToken && sentToken === axios.defaults.headers.common.Authorization) {
+        clearAccount(); setWalletBalance(0); setBookings([]); setTransactions([]);
+        setCurrentUser(null);
+        localStorage.removeItem('travoai_user');
+        delete axios.defaults.headers.common.Authorization;
+        setMessages((prev) => [...prev, { sender: 'bot', text: '🔒 **Your sign-in expired**, so you have been signed out. Sign in again to book or see your bookings; chat keeps working as a guest.' }]);
+      }
+      return Promise.reject(error);
+    });
+    return () => axios.interceptors.response.eject(id);
+  }, []);
 
   // Refresh the authenticated server account whenever navigation changes
   useEffect(() => {
@@ -117,10 +138,14 @@ export default function App() {
 
     const isWallet = booking.paid_via_wallet;
     const nominal = Number(booking.nominal_amount ?? booking.actual_price);
+    const charged = Number(booking.charged_amount ?? nominal);
+    const balance = Math.max(0, Math.round((nominal - charged) * 100) / 100);
+    const inr = (n) => `₹${n.toLocaleString('en-IN')}`;
     const headerTitle = isWallet ? "🎉 **Payment Received — paid from TravoAI Wallet**" : "🎉 **Booking Confirmed**";
+    const balanceLine = balance > 0 ? `\n* **Not collected online**: ${inr(balance)}` : '';
     const paymentLine = isWallet
-      ? `* **Paid from Wallet**: ₹${nominal.toLocaleString('en-IN')}\n* **Remaining Balance**: ₹${Number(booking.remaining_wallet_balance || 0).toLocaleString('en-IN')}`
-      : `* **Invoice Total**: ₹${nominal.toLocaleString('en-IN')}\n* **Charged via Razorpay now**: ₹${nominal.toLocaleString('en-IN')}`;
+      ? `* **Booking value**: ${inr(nominal)}\n* **Paid from Wallet**: ${inr(charged)}${balanceLine}\n* **Remaining Wallet Balance**: ${inr(Number(booking.remaining_wallet_balance || 0))}`
+      : `* **Booking value**: ${inr(nominal)}\n* **Paid via Razorpay**: ${inr(charged)}${balanceLine}`;
 
     const invoiceLine = booking.invoice
       ? `\n* **Invoice No.**: \`${booking.invoice.invoice_no}\``
@@ -128,7 +153,7 @@ export default function App() {
 
     const botMsg = {
       sender: 'bot',
-      text: `${headerTitle}\n\n* **Item**: ${booking.item_name}\n* **PNR Number**: \`${booking.pnr}\`\n* **Ticket Number**: \`${booking.ticket_number}\`\n* **Booking ID**: \`${booking.booking_id}\`\n* **Transaction ID**: \`${booking.txn_id || 'TXN-CONFIRMED'}\`${invoiceLine}\n${paymentLine}\n\nYour payment receipt is ready. Supplier confirmation is pending — open them from the card below or under **My Bookings**.`,
+      text: `${headerTitle}\n\n* **Item**: ${booking.item_name}\n* **PNR Number**: \`${booking.pnr}\`\n* **Ticket Number**: \`${booking.ticket_number}\`\n* **Booking ID**: \`${booking.booking_id}\`\n* **Transaction ID**: \`${booking.txn_id || 'TXN-CONFIRMED'}\`${invoiceLine}\n${paymentLine}\n\nYour invoice is ready: download the PDF below, or any time from **My Bookings**. Supplier confirmation is pending.`,
       booking: booking,
       invoice: booking.invoice || null,
     };
@@ -193,6 +218,17 @@ export default function App() {
 
     const userMsg = { sender: 'user', text: userText };
     setMessages((prev) => [...prev, userMsg]);
+
+    // "show more" reveals what the last list held back: no new search or AI call.
+    const lastList = [...messages].reverse().find((m) => m.sender === 'bot' && (m.results?.length || 0) > SHOWN_RESULTS && !m.moreShown);
+    if (asksForMore(userText) && lastList) {
+      const more = lastList.results.slice(SHOWN_RESULTS);
+      setMessages((prev) => [
+        ...prev.map((m) => (m === lastList ? { ...m, moreShown: true } : m)),
+        { sender: 'bot', text: `Here are ${more.length} more option${more.length === 1 ? '' : 's'}:`, type: lastList.type, results: more },
+      ]);
+      return;
+    }
     setLoading(true);
 
     if (currentUser?.username) {
@@ -200,11 +236,15 @@ export default function App() {
     }
 
     try {
-      const response = await axios.post('/chat', {
-        message: userText,
-        sessionId: sessionId,
-        userCity: activeCity
-      });
+      const ask = () => axios.post('/chat', { message: userText, sessionId, userCity: activeCity });
+      let response;
+      try {
+        response = await ask();
+      } catch (err) {
+        // The interceptor has signed out the stale session; answer as a guest.
+        if (err.response?.status !== 401) throw err;
+        response = await ask();
+      }
 
       const data = response.data;
       if (data.activeCity) {
@@ -217,7 +257,8 @@ export default function App() {
         intent: data.intent,
         type: data.type,
         results: data.results || [],
-        sources: data.sources || []
+        sources: data.sources || [],
+        curated: data.curated === true
       };
 
       setMessages((prev) => [...prev, botMsg]);
@@ -229,15 +270,17 @@ export default function App() {
       console.error('Chat error:', error);
       const status = error.response?.status;
 
-      // The server sends its own quota-style message for 429/503; only fall
-      // back to a generic line when it could not be reached at all.
+      // Prefer the server's own message; otherwise describe what actually failed.
+      // (An exhausted AI quota never reaches here: chat falls back to keyword intent.)
       const text =
         error.response?.data?.text ||
         (status === 429
-          ? "🔌 **API tokens exhausted** — too many requests in a short time. Please wait a moment and try again."
-          : status
-            ? "🔌 **API tokens exhausted** — the AI service quota for this session has run out. Please try again in a few minutes."
-            : "📡 **Can't reach the TravoAI server.** Make sure the backend is running (`npm start`), then try again.");
+          ? "⏳ **Too many requests** in a short time. Please wait a minute and try again."
+          : status === 401
+            ? "🔒 Please sign in again, then retry."
+            : status
+              ? "⚠️ **Something went wrong on our side.** Please try again in a moment."
+              : "📡 **Can't reach the TravoAI server.** Check your connection and try again.");
 
       setMessages((prev) => [...prev, { sender: 'bot', text }]);
     } finally {
@@ -260,6 +303,7 @@ export default function App() {
         onLogout={handleLogout}
         onOpenRagModal={() => setIsRagModalOpen(true)}
       />
+      <PaymentBanner />
 
       {/* Sliding YouTube-style Left Navigation Drawer */}
       <LeftDrawer

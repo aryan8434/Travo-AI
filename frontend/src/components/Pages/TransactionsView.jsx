@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import { CreditCard, CheckCircle2, XCircle, Clock, ShieldCheck, ArrowLeft, Search } from 'lucide-react';
+import { CreditCard, CheckCircle2, XCircle, Clock, ShieldCheck, ArrowLeft, Search, Download } from 'lucide-react';
+import { downloadInvoice } from '../../utils/invoice';
 
 export default function TransactionsView({ transactions, onBackToHome }) {
   const [filter, setFilter] = useState('ALL');
@@ -132,8 +133,14 @@ export default function TransactionsView({ transactions, onBackToHome }) {
                       : `Gateway charge: ₹${Number(txn.charged_amount ?? 1).toLocaleString('en-IN')}`}
                   </span>
                   {txn.invoice?.invoice_no && (
-                    <span className="text-[10px] text-slate-500 block font-mono">
+                    <span className="text-[10px] text-slate-500 flex items-center gap-2 md:justify-end font-mono">
                       Invoice {txn.invoice.invoice_no}
+                      <button
+                        onClick={() => downloadInvoice(txn.invoice.invoice_no).catch(() => alert('Invoice download failed. Please sign in and try again.'))}
+                        className="text-cyan-400 hover:underline font-sans font-semibold flex items-center gap-0.5"
+                      >
+                        <Download className="w-3 h-3" /> PDF
+                      </button>
                     </span>
                   )}
                   <span className="text-[10px] text-emerald-400 font-semibold flex items-center gap-1 md:justify-end mt-0.5">

@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { refreshAccount } from './storage';
+import { chargeFor, getPaymentConfig } from './paymentConfig';
 let sdk;
 function loadRazorpayScript() {
   if (window.Razorpay) return Promise.resolve();
@@ -30,19 +31,27 @@ export async function initializePayment(item, onSuccess, onError) {
     if (!axios.defaults.headers.common.Authorization) throw new Error('Please sign in to pay');
     const kind = item.package_id === 'WALLET_TOPUP' ? 'wallet' : 'booking';
     const selection = { package_id: item.package_id, quote: item.quote };
-    const account = await refreshAccount();
+    const [account, config] = await Promise.all([refreshAccount(), getPaymentConfig()]);
     const price = Number(item.price_inr ?? item.price ?? item.price_per_night_inr);
-    if (kind === 'booking' && account.wallet >= price) {
+    // The server decides the charge; this only picks wallet vs gateway and labels checkout.
+    const charge = kind === 'booking' ? chargeFor(price, config) : price;
+    // A ₹1 confirmation always goes through Razorpay; the wallet pays only full-price bookings.
+    if (kind === 'booking' && charge === price && account.wallet >= charge) {
       const { data } = await axios.post('/user/book', { item: selection, requestId: crypto.randomUUID() });
       return success(data);
     }
     await loadRazorpayScript();
     const { data: order } = await axios.post('/api/create-order', { kind, item: selection, amount: price });
-    if (!order.success || !/^rzp_live_/.test(order.key_id)) throw new Error('Live checkout is unavailable');
+    // The key prefix must agree with the mode the server reports (test keys only in test mode).
+    const keyPattern = order.mode === 'test' ? /^rzp_test_/ : /^rzp_live_/;
+    if (!order.success || !keyPattern.test(order.key_id)) throw new Error('Checkout is unavailable');
     let verifying = false;
     const rzp = new window.Razorpay({
       key: order.key_id, order_id: order.order_id, amount: order.amount, currency: 'INR',
-      name: 'TravoAI', description: kind === 'wallet' ? 'Wallet top-up' : item.title || item.name || 'Travel booking',
+      name: 'TravoAI',
+      description: kind === 'wallet'
+        ? 'Wallet top-up'
+        : `${charge < price ? `₹${charge} confirmation · ` : ''}${item.title || item.name || 'Travel booking'}`.slice(0, 250),
       theme: { color: '#0ea5e9' },
       handler: async response => {
         verifying = true;

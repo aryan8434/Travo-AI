@@ -38,3 +38,11 @@ test('deployed RAG searches a prebuilt index without writes and rejects mutation
   `, { RAG_READ_ONLY: '1', RAG_INDEX_DIR: path.join(directory, 'missing') });
   assert.equal(fs.existsSync(path.join(directory, 'missing')), false);
 });
+
+test('the Vercel entry sets production and read-only defaults before the app loads', () => {
+  const run = (env) => spawnSync(process.execPath, ['--input-type=module', '-e', "await import('./utils/vercelRuntime.js'); console.log(process.env.NODE_ENV + ' ' + process.env.RAG_READ_ONLY)"], { env: { PATH: process.env.PATH, ...env }, encoding: 'utf8' }).stdout.trim();
+  assert.equal(run({ VERCEL: '1' }), 'production 1');
+  // The build opts out of read-only mode; local runs are untouched.
+  assert.equal(run({ VERCEL: '1', RAG_READ_ONLY: '0' }), 'production 0');
+  assert.equal(run({}), 'undefined undefined');
+});

@@ -1,16 +1,21 @@
-import React from 'react';
-import { X, Printer, Compass, CheckCircle2, ShieldCheck, QrCode, Calendar, MapPin, Users, Hash } from 'lucide-react';
+import React, { useState } from 'react';
+import { X, Printer, Download, Loader2, Compass, CheckCircle2, ShieldCheck, QrCode, Calendar, MapPin, Users, Hash } from 'lucide-react';
 import InvoiceCard from '../Payment/InvoiceCard';
+import { downloadInvoice } from '../../utils/invoice';
 
 export default function TicketModal({ booking, onClose }) {
+  const [downloading, setDownloading] = useState(false);
   if (!booking) return null;
 
   const nominal = Number(booking.nominal_amount ?? booking.actual_price ?? 0);
   const charged = Number(booking.charged_amount ?? 0);
   const paidViaWallet = booking.paid_via_wallet;
 
-  const handlePrint = () => {
-    window.print();
+  const invoiceNo = booking.invoice?.invoice_no;
+  const handleDownload = async () => {
+    if (!invoiceNo) return window.print();
+    setDownloading(true);
+    try { await downloadInvoice(invoiceNo); } catch { window.print(); } finally { setDownloading(false); }
   };
 
   const isConfirmed = booking.status === 'CONFIRMED';
@@ -154,11 +159,12 @@ export default function TicketModal({ booking, onClose }) {
         <div className="p-4 bg-slate-900/90 border-t border-slate-800 flex items-center justify-between">
           <span className="text-[10px] text-slate-400">Your travel ticket will come from the supplier.</span>
           <button
-            onClick={handlePrint}
-            className="px-4 py-2 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-bold text-xs rounded-xl shadow-md flex items-center gap-1.5 transition-all"
+            onClick={handleDownload}
+            disabled={downloading}
+            className="px-4 py-2 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-bold text-xs rounded-xl shadow-md flex items-center gap-1.5 transition-all disabled:opacity-60"
           >
-            <Printer className="w-4 h-4" />
-            <span>Print / Download PDF</span>
+            {downloading ? <Loader2 className="w-4 h-4 animate-spin" /> : invoiceNo ? <Download className="w-4 h-4" /> : <Printer className="w-4 h-4" />}
+            <span>{invoiceNo ? 'Download invoice PDF' : 'Print ticket'}</span>
           </button>
         </div>
 

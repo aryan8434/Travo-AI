@@ -9,7 +9,8 @@ export function getStoredBookings() {
 export function getStoredTransactions() {
   return (account.walletHistory || []).filter(h => h.invoice).map(h => ({
     id: `${h.orderId}-${h.type}`, item_name: h.description, item_type: h.type,
-    actual_price: Math.abs(h.amount), charged_amount: Math.abs(h.amount), status: 'PAID',
+    // The receipt holds the item's full value; the ledger amount is what was paid.
+    actual_price: h.invoice.nominal_amount ?? Math.abs(h.amount), charged_amount: Math.abs(h.amount), status: 'PAID',
     date: h.createdAt, payment_id: h.paymentId || '', order_id: h.orderId,
     payment_method: h.invoice.gateway, invoice: h.invoice,
   }));

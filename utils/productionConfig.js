@@ -10,12 +10,21 @@ export function coreProductionIssues(env = process.env) {
   return issues;
 }
 
+// RAZORPAY_MODE=test is an explicit opt-in for demos: it accepts only rzp_test_
+// keys, so no real money can move, and the webhook becomes optional because
+// browser verification settles test payments on its own.
+export function paymentMode(env = process.env) {
+  return env.RAZORPAY_MODE === 'test' ? 'test' : 'live';
+}
+
 export function paymentProductionIssues(env = process.env) {
   const issues = [];
-  if (!/^rzp_live_[A-Za-z0-9]+$/.test(env.RAZORPAY_KEY_ID || '') || !env.RAZORPAY_KEY_SECRET) issues.push('A fresh live Razorpay key pair is required');
+  const mode = paymentMode(env);
+  if (!new RegExp(`^rzp_${mode}_[A-Za-z0-9]+$`).test(env.RAZORPAY_KEY_ID || '') || !env.RAZORPAY_KEY_SECRET) issues.push(mode === 'test' ? 'Test mode requires a Razorpay test key pair (rzp_test_)' : 'A fresh live Razorpay key pair is required');
   if (compromisedKeys.includes(crypto.createHash('sha256').update(env.RAZORPAY_KEY_ID || '').digest('hex'))) issues.push('The configured Razorpay key was exposed in Git and must be replaced');
-  if (!env.RAZORPAY_WEBHOOK_SECRET || env.RAZORPAY_WEBHOOK_SECRET.length < 32) issues.push('RAZORPAY_WEBHOOK_SECRET must contain at least 32 characters');
-  if (env.RAZORPAY_WEBHOOK_SECRET && env.RAZORPAY_WEBHOOK_SECRET === env.JWT_SECRET) issues.push('Webhook and authentication secrets must be different');
+  const webhook = env.RAZORPAY_WEBHOOK_SECRET;
+  if ((mode === 'live' || webhook) && (!webhook || webhook.length < 32)) issues.push('RAZORPAY_WEBHOOK_SECRET must contain at least 32 characters');
+  if (webhook && webhook === env.JWT_SECRET) issues.push('Webhook and authentication secrets must be different');
   return issues;
 }
 
