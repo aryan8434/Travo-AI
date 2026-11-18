@@ -39,6 +39,26 @@ test('deployed RAG searches a prebuilt index without writes and rejects mutation
   assert.equal(fs.existsSync(path.join(directory, 'missing')), false);
 });
 
+test('a Gemini outage degrades the deploy index to uniform local vectors instead of failing the build', async () => {
+  const { buildIndex } = await import('../utils/indexBuild.js');
+  const saved = process.env.EMBEDDING_PROVIDER, warnings = [], calls = [];
+  try {
+    process.env.EMBEDDING_PROVIDER = '';
+    const sync = async (options) => { calls.push({ ...options, provider: process.env.EMBEDDING_PROVIDER }); if (!options) throw new Error('Embedding provider HTTP 429'); return 'built'; };
+    assert.equal(await buildIndex(sync, { requireGemini: false, warn: m => warnings.push(m) }), 'built');
+    assert.deepEqual(calls, [{ provider: '' }, { force: true, provider: 'local' }], 'second attempt is a forced local rebuild');
+    assert.match(warnings[0], /HTTP 429.*uniform local-vector index/);
+    // Opt-in strictness: the same outage fails the build.
+    process.env.EMBEDDING_PROVIDER = '';
+    await assert.rejects(buildIndex(async () => { throw new Error('Embedding provider HTTP 429'); }, { requireGemini: true }), /HTTP 429/);
+    assert.equal(process.env.EMBEDDING_PROVIDER, '', 'strict mode does not switch providers');
+    // A healthy provider is built once, untouched.
+    calls.length = 0;
+    assert.equal(await buildIndex(async (o) => { calls.push(o); return 'ok'; }, { requireGemini: false }), 'ok');
+    assert.equal(calls.length, 1);
+  } finally { if (saved === undefined) delete process.env.EMBEDDING_PROVIDER; else process.env.EMBEDDING_PROVIDER = saved; }
+});
+
 test('the Vercel entry sets production and read-only defaults before the app loads', () => {
   const run = (env) => spawnSync(process.execPath, ['--input-type=module', '-e', "await import('./utils/vercelRuntime.js'); console.log(process.env.NODE_ENV + ' ' + process.env.RAG_READ_ONLY)"], { env: { PATH: process.env.PATH, ...env }, encoding: 'utf8' }).stdout.trim();
   assert.equal(run({ VERCEL: '1' }), 'production 1');

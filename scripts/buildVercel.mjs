@@ -8,7 +8,8 @@ const root = fileURLToPath(new URL('../', import.meta.url));
 process.env.RAG_READ_ONLY = '0';
 process.env.RAG_INDEX_DIR = path.join(root, '.vercel-rag');
 const { syncVectraIndex } = await import('../utils/ragEngine.js');
-await syncVectraIndex();
+const { buildIndex } = await import('../utils/indexBuild.js');
+await buildIndex(syncVectraIndex);
 // Tailwind/PostCSS resolve their configuration relative to the frontend cwd.
 process.chdir(path.join(root, 'frontend'));
 await build({ root: path.join(root, 'frontend') });

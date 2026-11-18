@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A newer push to the same branch or PR cancels the run it replaces.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Lint and tests (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24] # package.json requires >=22.12
+    env:
+      # The test suite blanks these itself; setting them here as well guarantees CI
+      # never reaches a paid provider or uses a real key.
+      EMBEDDING_PROVIDER: local
+      GEMINI_API_KEY: ""
+      GROQ_API_KEY: ""
+      # Keep the in-memory MongoDB binary in a folder we can cache between runs.
+      MONGOMS_DOWNLOAD_DIR: ${{ github.workspace }}/.cache/mongodb-binaries
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
+      - uses: actions/cache@v4
+        with:
+          path: .cache/mongodb-binaries
+          key: mongodb-binaries-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: mongodb-binaries-${{ runner.os }}-
+      - run: npm ci
+      - run: npm --prefix frontend ci
+      - name: Lint frontend
+        run: npm run lint
+      - name: Validate package catalogue
+        run: npm run validate:packages
+      - name: Test
+        run: npm test
+
+  # Runs the same script Vercel runs (RAG index + frontend bundle), so a build that
+  # would fail on deploy fails here first. It uses local embeddings: no API keys.
+  vercel-build:
+    name: Vercel build script
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      EMBEDDING_PROVIDER: local
+      GEMINI_API_KEY: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
+      - run: npm ci
+      - run: npm --prefix frontend ci
+      - name: Build index and frontend
+        run: node scripts/buildVercel.mjs

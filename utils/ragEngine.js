@@ -115,11 +115,40 @@ export function loadAllPackages() {
 /* ================================================================
    TEXT BUILDERS + CHUNKING
 ================================================================ */
-export function summaryText(pkg) {
+/** Hard cap on the words in ANY text sent to the embedder (header lines included). */
+export const MAX_EMBED_WORDS = 350;
+const wordCount = (s) => String(s).split(/\s+/).filter(Boolean).length;
+
+// Windows of at most `max` words, for a single line too long to keep whole.
+function wordWindows(text, max, overlap = 40) {
+  const words = String(text).split(/\s+/).filter(Boolean);
+  if (words.length <= max) return [words.join(" ")];
+  const out = [];
+  for (let i = 0; i < words.length; i += max - overlap) {
+    out.push(words.slice(i, i + max).join(" "));
+    if (i + max >= words.length) break;
+  }
+  return out;
+}
+
+// Greedily pack whole lines into parts of at most `max` words each.
+function packLines(lines, max) {
+  const parts = [];
+  let current = [], count = 0;
+  const flush = () => { if (current.length) parts.push(current.join("\n")); current = []; count = 0; };
+  for (const line of lines) {
+    const n = wordCount(line);
+    if (n > max) { flush(); parts.push(...wordWindows(line, max)); continue; }
+    if (count + n > max) flush();
+    current.push(line);
+    count += n;
+  }
+  flush();
+  return parts;
+}
+
+function summaryLines(pkg) {
   const highlights = (pkg.highlights || []).join(". ");
-  const itinerary = (pkg.itinerary || [])
-    .map((d) => `Day ${d.day}: ${d.title} - ${(d.activities || []).join(", ")} ${d.description || ""}`)
-    .join(". ");
   return [
     `Package: ${pkg.title}`,
     `Destination: ${pkg.destination}, ${pkg.state || ""}, ${pkg.country || "India"}`,
@@ -132,9 +161,14 @@ export function summaryText(pkg) {
     `Excluded services: ${JSON.stringify(pkg.excluded_services || pkg.exclusions || [])}`,
     `Cancellation: ${JSON.stringify(pkg.cancellation_policy || "Contact the supplier for package-specific terms")}`,
     `Highlights: ${highlights}`,
-    `Itinerary: ${itinerary}`,
     `Tags: ${(pkg.tags || []).join(" ")}`,
-  ].join("\n");
+    // One line per day, so a long itinerary can be split between whole days.
+    ...(pkg.itinerary || []).map((d) => `Itinerary day ${d.day}: ${d.title} - ${(d.activities || []).join(", ")} ${d.description || ""}`.trim()),
+  ];
+}
+
+export function summaryText(pkg) {
+  return summaryLines(pkg).join("\n");
 }
 
 /**
@@ -222,7 +256,7 @@ function sha1(s) {
 /**
  * Desired vector records for a package: one summary + N guide chunks.
  */
-function desiredRecords(pkg) {
+export function desiredRecords(pkg) {
   const records = [];
   const baseMeta = {
     package_id: pkg.package_id,
@@ -254,26 +288,38 @@ function desiredRecords(pkg) {
     },
   });
 
-  const summary = summaryText(pkg);
-  records.push({
-    chunkId: `${pkg.package_id}::summary`,
-    text: summary,
-    metadata: {
-      ...baseMeta,
-      chunk_id: `${pkg.package_id}::summary`,
-      kind: "summary",
-      section: "Summary",
+  // A summary over the cap is split between whole lines (itinerary days included).
+  // Every continuation starts with the package name, so no part loses its package.
+  const continued = `Package: ${pkg.title} (continued)`;
+  packLines(summaryLines(pkg), MAX_EMBED_WORDS - wordCount(continued)).forEach((part, i) => {
+    const summary = i === 0 ? part : `${continued}\n${part}`;
+    const chunkId = i === 0 ? `${pkg.package_id}::summary` : `${pkg.package_id}::summary::${i}`;
+    records.push({
+      chunkId,
       text: summary,
-      word_count: summary.split(/\s+/).filter(Boolean).length,
-      content_status: pkg.content_status || "legacy",
-    },
+      metadata: {
+        ...baseMeta,
+        chunk_id: chunkId,
+        kind: "summary",
+        section: i === 0 ? "Summary" : "Summary (continued)",
+        ...(i > 0 ? { chunk_index: i } : {}),
+        text: summary,
+        word_count: wordCount(summary),
+        content_status: pkg.content_status || "legacy",
+      },
+    });
   });
 
+  // Guide passages get a header line, so the passage budget leaves room for it
+  // (header + up to ~10 words of section label) to keep the embedded text <= the cap.
+  const header = contextHeader(pkg);
   const guide = pkg.content_status === "complete" ? (pkg.detailed_guide || pkg.full_guide || "") : "";
-  chunkGuide(guide).forEach((c, i) => {
+  chunkGuide(guide, { words: MAX_EMBED_WORDS - wordCount(header) - 12 }).forEach((c, i) => {
+    // A very long grouped label falls back to its first heading to stay under the cap.
+    const label = wordCount(`${header} — ${c.section}`) + wordCount(c.text) > MAX_EMBED_WORDS ? c.section.split(" / ")[0] : c.section;
     records.push({
       chunkId: `${pkg.package_id}::guide::${i}`,
-      text: `${contextHeader(pkg)} — ${c.section}\n${c.text}`,
+      text: `${header} — ${label}\n${c.text}`,
       metadata: {
         ...baseMeta,
         chunk_id: `${pkg.package_id}::guide::${i}`,
