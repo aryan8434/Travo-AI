@@ -20,14 +20,19 @@ console.log(`Packages: ${pkgs.length}  (economical ${tiers.economical || 0} · p
 console.log(`Guides complete: ${complete}/${pkgs.length}`);
 console.log(`Embedding provider: ${embeddingProvider()}${force ? "  [FORCE]" : ""}\n`);
 
-await syncVectraIndex({ force });
+try {
+  await syncVectraIndex({ force });
+} catch (err) {
+  // Embedding failures abort the build instead of storing local-hash fallbacks.
+  // Batches already embedded are cached on disk, so re-running resumes from there.
+  console.error(`\n❌ Reindex stopped: ${err.message}\n   The existing index was left unchanged. Embedded batches are cached; run \`npm run reindex\` again once the provider recovers.`);
+  process.exit(1);
+}
 flushEmbedCache();
 
 const degraded = degradedEmbeddingCount();
 if (degraded > 0) {
-  console.warn(
-    `\n⚠️  ${degraded} chunk(s) used a local vector because Gemini was rate-limited.\n   Re-run \`npm run reindex -- --force\` once your quota resets to make the whole index Gemini-quality.`,
-  );
+  console.warn(`\n⚠️  ${degraded} chunk(s) used a local vector because the embedding provider failed.`);
 }
 
 // Smoke-test retrieval.

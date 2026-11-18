@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import { vectraIndex as index, loadAllPackages, syncVectraIndex } from "./ragEngine.js";
+import { vectraIndex as index, loadAllPackages, ensureIndex, indexItems } from "./ragEngine.js";
 import { embeddingProvider, embeddingModel, EMBED_DIM, INDEX_DIR } from "./embeddings.js";
 
 import { rankChunks } from "./retrieval.js";
@@ -66,21 +66,10 @@ function toChunkView(item, extra = {}) {
   };
 }
 
-let _cache = { key: "", items: [] };
-
 async function allIndexItems() {
-  await syncVectraIndex();
+  await ensureIndex();
   if (!(await index.isIndexCreated())) return [];
-  let key = "0";
-  try {
-    key = String(fs.statSync(path.join(vectraFolder, "index.json")).mtimeMs);
-  } catch {
-    /* index file may not exist yet */
-  }
-  if (key === _cache.key && _cache.items.length) return _cache.items;
-  const items = await index.listItems();
-  _cache = { key, items };
-  return items;
+  return indexItems();
 }
 
 /**

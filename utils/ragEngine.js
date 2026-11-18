@@ -3,9 +3,9 @@ import path from "path";
 import crypto from "crypto";
 import { fileURLToPath } from "url";
 import { LocalIndex } from "vectra";
-import { embedBatch, embedRecords, embeddingProvider, embeddingModel, flushEmbedCache, INDEX_DIR, READ_ONLY_INDEX } from "./embeddings.js";
+import { embedBatch, embedRecords, embeddingProvider, configuredEmbeddingModel, flushEmbedCache, INDEX_DIR, READ_ONLY_INDEX } from "./embeddings.js";
 
-import { parseTravelPreferences } from "./travelPreferences.js";
+import { parseTravelPreferences, parseSortIntent } from "./travelPreferences.js";
 import { rankChunks } from "./retrieval.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -138,34 +138,80 @@ export function summaryText(pkg) {
 }
 
 /**
- * Split a long markdown guide into ~350-word overlapping chunks, keeping the
- * nearest preceding "## Heading" as a section label on each chunk.
+ * Facts-only record for price questions: a short, number-dense passage that
+ * matches queries such as "what costs ₹53,000" or "premium Goa for 2". Prices in
+ * the long guide prose are never relied on; this is built from the structured
+ * fields, so a price change re-embeds this one record instead of the whole guide.
+ */
+export function factsText(pkg) {
+  const price = Number(pkg.price_inr || pkg.price || 0);
+  const guests = Number(pkg.capacity_people || 2);
+  const inr = (n) => `₹${Number(n).toLocaleString("en-IN")}`;
+  const services = Object.entries(pkg.included_services || {})
+    .filter(([, v]) => v && v !== false)
+    .map(([k, v]) => `${k.replaceAll("_", " ")}: ${typeof v === "boolean" ? "included" : v}`)
+    .join("; ");
+  return [
+    `Price facts for ${pkg.title} (${pkg.package_id}).`,
+    `Total price ${inr(price)} (INR ${price}) for ${guests} guests, about ${inr(Math.round(price / (guests || 1)))} per person.`,
+    `${pkg.days || 3} days ${pkg.nights || 2} nights, ${pkg.budget_tier} tier, ${pkg.destination}${pkg.state ? `, ${pkg.state}` : ""}, ${pkg.country || "India"}.`,
+    `Hotel ${pkg.hotel_name || "not specified"} (${pkg.hotel_tier || "tier not specified"}), rating ${pkg.rating || 4.5}.`,
+    `Best months: ${(pkg.best_months || []).join(", ") || "not specified"}.`,
+    services ? `Included: ${services}.` : "",
+  ].filter(Boolean).join("\n");
+}
+
+/** "Goa | Premium | 5D/4N | 2 guests" — prefixed to every chunk so it never loses its package. */
+function contextHeader(pkg) {
+  const where = [pkg.destination, pkg.state, pkg.country].filter(Boolean).filter((v, i, a) => a.indexOf(v) === i).join(", ");
+  return `${pkg.title} | ${where} | ${BUDGET_TIERS[pkg.budget_tier]?.label || pkg.budget_tier} | ${pkg.days || 3}D/${pkg.nights || 2}N | ${pkg.capacity_people || 2} guests`;
+}
+
+/**
+ * Split a markdown guide into chunks of at most `words` words that respect
+ * section boundaries: short sections are grouped together, a section longer than
+ * the limit is split into overlapping windows. A chunk is labelled with the
+ * heading(s) it covers, e.g. "Overview / Why Visit".
  */
 export function chunkGuide(guide, { words = 350, overlap = 60 } = {}) {
   if (!guide || typeof guide !== "string") return [];
-  const lines = guide.split(/\r?\n/);
-  const tokens = []; // { w, section }
-  let section = "Overview";
-  for (const line of lines) {
-    const h = line.match(/^#{1,3}\s+(.*)/);
+  const sections = [];
+  let current = { heading: "Overview", words: [] };
+  for (const line of guide.split(/\r?\n/)) {
+    const h = line.match(/^(#{1,3})\s+(.*)/);
     if (h) {
-      section = h[1].trim();
+      if (h[1].length === 1) continue; // the document title is not a section
+      if (current.words.length) sections.push(current);
+      current = { heading: h[2].trim(), words: [] };
       continue;
     }
-    for (const w of line.split(/\s+/).filter(Boolean)) tokens.push({ w, section });
+    for (const w of line.split(/\s+/)) if (w) current.words.push(w);
   }
-  if (tokens.length === 0) return [];
+  if (current.words.length) sections.push(current);
 
   const chunks = [];
-  for (let i = 0; i < tokens.length; i += words - overlap) {
-    const slice = tokens.slice(i, i + words);
-    if (slice.length < 25 && chunks.length) break;
-    chunks.push({
-      section: slice[0].section,
-      text: slice.map((t) => t.w).join(" "),
-    });
-    if (i + words >= tokens.length) break;
+  let group = null;
+  const flush = () => {
+    if (group?.words.length) chunks.push({ section: group.labels.join(" / "), text: group.words.join(" ") });
+    group = null;
+  };
+  for (const sec of sections) {
+    if (sec.words.length > words) {
+      flush();
+      for (let i = 0; i < sec.words.length; i += words - overlap) {
+        const slice = sec.words.slice(i, i + words);
+        if (slice.length < 25 && i > 0) break; // tail already covered by the overlap
+        chunks.push({ section: sec.heading, text: slice.join(" ") });
+        if (i + words >= sec.words.length) break;
+      }
+      continue;
+    }
+    if (group && group.words.length + sec.words.length > words) flush();
+    group ||= { labels: [], words: [] };
+    group.labels.push(sec.heading);
+    for (const w of sec.words) group.words.push(w);
   }
+  flush();
   return chunks;
 }
 
@@ -188,7 +234,25 @@ function desiredRecords(pkg) {
     category: pkg.category || "",
     budget_tier: pkg.budget_tier,
     rating: pkg.rating || 4.5,
+    days: pkg.days || 3,
+    nights: pkg.nights || 2,
+    capacity_people: pkg.capacity_people || 2,
   };
+
+  const facts = factsText(pkg);
+  records.push({
+    chunkId: `${pkg.package_id}::facts`,
+    text: facts,
+    metadata: {
+      ...baseMeta,
+      chunk_id: `${pkg.package_id}::facts`,
+      kind: "facts",
+      section: "Price facts",
+      text: facts,
+      word_count: facts.split(/\s+/).filter(Boolean).length,
+      content_status: pkg.content_status || "legacy",
+    },
+  });
 
   const summary = summaryText(pkg);
   records.push({
@@ -209,7 +273,7 @@ function desiredRecords(pkg) {
   chunkGuide(guide).forEach((c, i) => {
     records.push({
       chunkId: `${pkg.package_id}::guide::${i}`,
-      text: `${pkg.title} — ${c.section}\n${c.text}`,
+      text: `${contextHeader(pkg)} — ${c.section}\n${c.text}`,
       metadata: {
         ...baseMeta,
         chunk_id: `${pkg.package_id}::guide::${i}`,
@@ -231,6 +295,7 @@ function desiredRecords(pkg) {
 ================================================================ */
 let _syncing = null;
 let lastSynced = '';
+let syncRetryAfter = 0;
 export async function syncVectraIndex({ force = false } = {}) {
   if (READ_ONLY_INDEX) {
     if (force) throw new Error('The deployed catalogue is read-only. Update the guides and redeploy to rebuild it.');
@@ -238,18 +303,25 @@ export async function syncVectraIndex({ force = false } = {}) {
     return;
   }
   if (_syncing) { await _syncing; if (!force) return; }
+  if (!force && Date.now() < syncRetryAfter) return; // a recent embedding failure: don't hammer the provider
   _syncing = (async () => {
     const sourceKey = newestMtime(packagesSubDir, force);
     if (!force && lastSynced === sourceKey && await index.isIndexCreated()) return;
     if (!(await index.isIndexCreated())) await index.createIndex();
     const packages = loadAllPackages();
     const existing = await index.listItems();
-    const desired = packages.flatMap(desiredRecords).map(rec => ({ ...rec, id: sha1(rec.chunkId), hash: sha1(JSON.stringify(rec.metadata) + embeddingModel() + ':v4') }));
+    // The hash names the CONFIGURED model, not whichever one answered a minute ago:
+    // a provider blip must not make every stored vector look stale and get rebuilt locally.
+    const desired = packages.flatMap(desiredRecords).map(rec => ({ ...rec, id: sha1(rec.chunkId), hash: sha1(JSON.stringify(rec.metadata) + rec.text + configuredEmbeddingModel() + ':v5') }));
     const previous = new Map(existing.map(item => [item.id, item]));
-    const changed = desired.filter(rec => force || previous.get(rec.id)?.metadata?.record_hash !== rec.hash);
+    // A record built with a different model than the configured one is rebuilt too, which
+    // heals an index that an earlier outage left half local-hash and half Gemini.
+    const changed = desired.filter(rec => force || previous.get(rec.id)?.metadata?.record_hash !== rec.hash || previous.get(rec.id)?.metadata?.embedding_model !== configuredEmbeddingModel());
     const wanted = new Set(desired.map(r => r.id));
     const removed = existing.filter(item => !wanted.has(item.id));
-    const vectors = await embedRecords(changed.map(rec => rec.text));
+    // strict: if Gemini is configured but fails, abort and leave the index untouched
+    // rather than overwriting good vectors with local hash fallbacks.
+    const vectors = await embedRecords(changed.map(rec => rec.text), { strict: true });
     // One atomic Vectra commit, no duplicate records on --force.
     await index.beginUpdate();
     try {
@@ -264,8 +336,32 @@ export async function syncVectraIndex({ force = false } = {}) {
     console.log('RAG sync:', packages.length, 'packages;', desired.length, 'chunks;', changed.length, 'updated;', removed.length, 'removed');
     return { packages: packages.length, chunks: desired.length, updated: changed.length };
   })();
-  try { return await _syncing; } finally { _syncing = null; }
+  try { return await _syncing; }
+  catch (err) { syncRetryAfter = Date.now() + 60000; throw err; }
+  finally { _syncing = null; }
 }
+
+// Query-path sync. If a refresh fails (provider outage) but an index already exists,
+// keep serving it instead of failing every search; the next attempt is a minute away.
+export async function ensureIndex() {
+  try { await syncVectraIndex(); }
+  catch (err) {
+    if (!(await index.isIndexCreated())) throw err;
+    console.warn('RAG refresh deferred, serving the existing index:', err.message);
+  }
+}
+
+// All index items, re-read only when index.json changes on disk.
+let _itemsCache = { key: '', items: [] };
+export async function indexItems() {
+  let key = '';
+  try { const st = fs.statSync(path.join(vectraFolder, 'index.json')); key = `${st.mtimeMs}:${st.size}`; } catch { /* index not built yet */ }
+  if (key && key === _itemsCache.key) return _itemsCache.items;
+  const items = await index.listItems();
+  _itemsCache = { key, items };
+  return items;
+}
+
 export function startPackageWatcher() {
   if (READ_ONLY_INDEX) return () => {};
   syncVectraIndex().catch(err => console.error('RAG sync failed:', err.message));
@@ -301,9 +397,9 @@ export async function retrievePackages(query = "", filters = {}, topK = 6) {
   if (typeof query !== 'string' || query.length > 2000) throw new Error('Invalid search query');
   const allPackages = loadAllPackages();
   if (allPackages.length === 0) {
-    return { matches: [], contextText: "No packages available.", vectorDbUsed: "Vectra" };
+    return { matches: [], total: 0, contextText: "No packages available.", vectorDbUsed: "Vectra" };
   }
-  await syncVectraIndex();
+  await ensureIndex();
 
   // STEP 1 — metadata filtering
   // With an explicit location, budget/tier only *rank* (soft) — the user asked
@@ -347,7 +443,7 @@ export async function retrievePackages(query = "", filters = {}, topK = 6) {
 
   const eligible = new Set(candidates.map(p => p.package_id));
   const pkgVectorScore = new Map();
-  const ranked = await rankChunks(await index.listItems(), queryText, { filter: item => eligible.has(item.metadata?.package_id) });
+  const ranked = await rankChunks(await indexItems(), queryText, { filter: item => eligible.has(item.metadata?.package_id) });
   for (const hit of ranked.scores) {
     const id = hit.item.metadata.package_id;
     pkgVectorScore.set(id, Math.max(pkgVectorScore.get(id) || 0, hit.score));
@@ -418,6 +514,12 @@ export async function retrievePackages(query = "", filters = {}, topK = 6) {
   });
 
   scored.sort((a, b) => b.match_score - a.match_score);
+  // "cheapest", "most expensive", "top rated": order by the structured field, not by
+  // how similar the prose is. Ties fall back to the relevance score above.
+  const sort = filters.sort || parseSortIntent(query);
+  const priceOf = (p) => p.price_inr || p.price || 0;
+  const byField = { price_asc: (a, b) => priceOf(a) - priceOf(b), price_desc: (a, b) => priceOf(b) - priceOf(a), rating_desc: (a, b) => (b.rating || 0) - (a.rating || 0) }[sort];
+  if (byField) scored.sort((a, b) => byField(a, b) || b.match_score - a.match_score);
   const finalMatches = scored.slice(0, topK);
 
   const contextText = finalMatches
@@ -432,6 +534,7 @@ export async function retrievePackages(query = "", filters = {}, topK = 6) {
     total: scored.length,
     sources: ranked.scores.filter(h => finalMatches.some(p => p.package_id === h.item.metadata.package_id)).slice(0, 6).map(h => ({ chunk_id: h.item.metadata.chunk_id, package_id: h.item.metadata.package_id, title: h.item.metadata.title, section: h.item.metadata.section, text: h.item.metadata.text, score: h.score })),
     contextText,
+    sort: byField ? sort : null,
     vectorDbUsed: `Vectra hybrid (${embeddingProvider()} embeddings)`,
   };
 }

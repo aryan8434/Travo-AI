@@ -1,6 +1,17 @@
 import { embedRecord, localEmbedding } from './embeddings.js';
 const STOP = new Set('a an the is are was were be this that these those what which how do does it its of in on at for to and or my me your you i we us can with about package holiday travel please tell'.split(' '));
-const words = s => (String(s).toLowerCase().match(/[\p{L}\p{N}]{2,}/gu) || []).filter(w => !STOP.has(w)).map(w => /^(included|includes|including|inclusions)$/.test(w) ? 'include' : w);
+// Turn rupee amounts into one stable token so "₹53,000", "Rs 53000" and "53k" all
+// match each other. Without this the tokenizer splits "53,000" into "53" and "000".
+// Small bare numbers (days, temperatures) are left alone.
+export function normalizeMoney(text) {
+  return String(text).replace(/(?<![a-z])(₹|rs\.?\s*|inr\s*)?(\d[\d,]*(?:\.\d+)?)\s*(lakhs?|lacs?|k|l)?\b/gi, (match, currency, number, suffix) => {
+    const digits = number.replaceAll(',', '');
+    const value = Math.round(Number(digits) * (/^l/i.test(suffix || '') ? 100000 : /^k$/i.test(suffix || '') ? 1000 : 1));
+    const looksLikeYear = !currency && !suffix && /^(19|20)\d{2}$/.test(digits);
+    return !looksLikeYear && Number.isFinite(value) && (currency || suffix || value >= 1000) ? ` inr${value} ` : match;
+  });
+}
+const words = s => (normalizeMoney(String(s).toLowerCase()).match(/[\p{L}\p{N}]{2,}/gu) || []).filter(w => !STOP.has(w)).map(w => /^(included|includes|including|inclusions)$/.test(w) ? 'include' : w);
 const dot = (a, b) => a.reduce((n, v, i) => n + v * (b[i] || 0), 0);
 const docs = new Map();
 
