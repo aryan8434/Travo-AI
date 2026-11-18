@@ -24,7 +24,7 @@ const { createPaymentRouter } = await import('../routes/payments.js');
 const { default: userRoutes } = await import('../routes/user.js');
 const { default: User } = await import('../models/User.js');
 const { toPaise, resolveBooking, attachQuote } = await import('../utils/checkout.js');
-const { loadAllPackages, retrievePackages, syncVectraIndex, vectraIndex, chunkGuide, ingestPackageGuide } = await import('../utils/ragEngine.js');
+const { loadAllPackages, retrievePackages, syncVectraIndex, vectraIndex, chunkGuide, ingestPackageGuide, desiredRecords, summaryText, MAX_EMBED_WORDS } = await import('../utils/ragEngine.js');
 const { rankChunks, normalizeMoney } = await import('../utils/retrieval.js');
 const { searchChunks } = await import('../utils/ragChunks.js');
 const { localEmbedding, embedRecords, configuredEmbeddingModel, embeddingProvider, retryPolicy } = await import('../utils/embeddings.js');
@@ -180,6 +180,21 @@ test('rupee amounts normalise to one searchable token, so exact prices match lex
   const items = ['Total price ₹41,000 for 2 guests', 'Total price ₹53,000 for 2 guests', 'Total price ₹67,000 for 2 guests'].map((text, id) => ({ id: String(id), vector: [], metadata: { text } }));
   const { scores } = await rankChunks(items, 'which package costs 53000');
   assert.match(scores[0].item.metadata.text, /53,000/);
+});
+test('every text sent to the embedder is at most 350 words, and long summaries split without losing lines', () => {
+  const wc = s => s.split(/\s+/).filter(Boolean).length;
+  const records = loadAllPackages().flatMap(desiredRecords);
+  assert.equal(MAX_EMBED_WORDS, 350);
+  const over = records.filter(r => wc(r.text) > MAX_EMBED_WORDS).map(r => `${r.chunkId}: ${wc(r.text)}`);
+  assert.deepEqual(over, []);
+  // Some catalogue summaries are longer than the cap: they become several parts,
+  // every continuation names its package, and no summary line is dropped.
+  const split = loadAllPackages().find(p => records.some(r => r.chunkId === `${p.package_id}::summary::1`));
+  assert.ok(split, 'at least one summary needs splitting');
+  const parts = records.filter(r => r.chunkId.startsWith(`${split.package_id}::summary`));
+  assert.ok(parts.slice(1).every(r => r.text.startsWith(`Package: ${split.title} (continued)`)));
+  const kept = parts.flatMap(r => r.text.split('\n'));
+  assert.ok(summaryText(split).split('\n').every(line => kept.includes(line)));
 });
 test('price facts records carry the exact catalogue price', async () => {
   const result = await searchChunks('what does it cost', { packageId: 'PKG-GOA-PRE', kind: 'facts', topK: 5 });
