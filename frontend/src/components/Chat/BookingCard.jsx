@@ -217,6 +217,14 @@ function BookingCard({ item, cardType, onBookingComplete, onBookingError, curren
               </span>
               <span className="ml-2 text-cyan-400 font-mono">🛫 {item.time || item.departure_time}</span>
             </div>
+            {item.live && (
+              <div className="text-[10px] text-emerald-400 mt-0.5" title={item.pricing_note}>
+                {item.test_mode ? 'Test-mode fare (not real)' : 'Live fare'}
+                {item.arrival_time ? ` · arrives ${item.arrival_time}` : ''}
+                {item.duration ? ` · ${item.duration}` : ''}
+                {item.stops === 0 ? ' · non-stop' : item.stops ? ` · ${item.stops} stop${item.stops > 1 ? 's' : ''}` : ''}
+              </div>
+            )}
             {item.distance_km && (
               <div className="text-[10px] text-slate-500 mt-0.5">
                 {item.distance_km.toLocaleString('en-IN')} km · ₹{item.rate_per_km}/km
@@ -238,7 +246,7 @@ function BookingCard({ item, cardType, onBookingComplete, onBookingError, curren
             price: actualPriceInRupees,
             onClick: handleBookNow,
             bookable: item.bookable !== false,
-            unavailable: 'Estimate · booking unavailable',
+            unavailable: item.live ? 'Live fare · book with airline' : 'Estimate · booking unavailable',
             className: 'px-4 py-1.5 bg-sky-600 hover:bg-sky-500 text-white font-semibold text-xs rounded-lg transition-all',
           })}
         </div>

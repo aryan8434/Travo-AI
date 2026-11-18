@@ -53,6 +53,8 @@ import {
   nearestAirportFor,
   findAirportsInText,
 } from "./utils/flightEngine.js";
+import { searchLiveFlights, liveFlightsConfigured } from "./providers/flightProvider.js";
+import { parseTravelDate, formatTravelDate } from "./utils/travelDate.js";
 import { fileURLToPath } from "url";
 import { createPaymentRouter, requireDatabase } from "./routes/payments.js";
 import { attachQuote, bookingCharge } from "./utils/checkout.js";
@@ -471,6 +473,65 @@ app.post("/chat", chatLimiter, chatIdentity, async (req, res) => {
         });
       }
 
+      // Live fares need a travel date. One typed in any turn of this flow is remembered.
+      const spokenDate = parseTravelDate(message);
+      if (spokenDate && spokenDate !== intent.travelDate) {
+        intent.travelDate = spokenDate;
+        await saveSlots(sessionId, intent);
+      }
+      let estimateNote = "";
+      if (liveFlightsConfigured()) {
+        if (!intent.travelDate) {
+          return sendResponse({
+            intent: "flight",
+            type: "flight",
+            text: `✈️ ${originAirport.city} (${originAirport.iata}) → ${destAirport.city} (${destAirport.iata}). Which date would you like to fly? (e.g. 28 Nov, 28/11 or tomorrow)`,
+            results: [],
+            activeCity,
+          });
+        }
+        const rupees = (n) => `₹${n.toLocaleString("en-IN")}`;
+        const when = formatTravelDate(intent.travelDate);
+        try {
+          const live = await searchLiveFlights({ from: originAirport.iata, to: destAirport.iata, date: intent.travelDate, fromCity: originAirport.city, toCity: destAirport.city });
+          const minPrice = intent.minPrice || 0;
+          const maxPrice = intent.maxPrice || Number.MAX_SAFE_INTEGER;
+          const fits = live.flights
+            .filter((f) => f.price >= minPrice && f.price <= maxPrice && (!f.time || isInTimeSlot(f.time, intent.timePreference)))
+            .slice(0, 20);
+          const checked = new Date(live.fetched_at).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Kolkata" });
+          const sandbox = live.test_mode ? " ⚠️ Test-mode data: these are not real prices." : "";
+          if (fits.length) {
+            return sendResponse({
+              intent: "flight",
+              type: "flight",
+              text: `✈️ Live fares ${originAirport.city} → ${destAirport.city} on **${when}**${intent.maxPrice ? ` up to ${rupees(maxPrice)}` : ""}, checked at ${checked} IST. Fares change quickly; book with the airline.${sandbox}`,
+              results: fits,
+              live: true,
+              activeCity,
+            });
+          }
+          if (live.flights.length) {
+            // Real fares exist, just not in this budget/time: say so instead of showing estimates.
+            return sendResponse({
+              intent: "flight",
+              type: "flight",
+              text: `😕 No live fare ${originAirport.city} → ${destAirport.city} on ${when} fits ${rupees(minPrice)}–${intent.maxPrice ? rupees(maxPrice) : "any price"}${intent.timePreference ? ` in the ${intent.timePreference}` : ""}. The cheapest live fare that day is ${rupees(live.flights[0].price)}.${sandbox}`,
+              results: [],
+              live: true,
+              activeCity,
+            });
+          }
+          estimateNote = live.skipped_non_inr
+            ? `The live provider only returned fares in other currencies for ${when}, so these are estimates.`
+            : `No live fares were found for ${when}, so these are estimates.`;
+        } catch (err) {
+          console.warn("Live flight search failed:", err.message);
+          estimateNote = "Live fares are unavailable right now, so these are estimates.";
+        }
+      }
+      const note = estimateNote ? `ℹ️ ${estimateNote}\n\n` : "";
+
       const result = buildFlights(originAirport.city, destAirport.city, 60);
       if (!result.ok) {
         return sendResponse({
@@ -486,7 +547,7 @@ app.post("/chat", chatLimiter, chatIdentity, async (req, res) => {
         return sendResponse({
           intent: "flight",
           type: "flight",
-          text: `✈️ ${result.from.city} (${result.from.iata}) → ${result.to.city} (${result.to.iata}) is about **${result.distanceKm} km**. Fares are calculated at ₹2.0–₹2.5 per km. What's your budget? (e.g. 5000 to 12000)`,
+          text: `${note}✈️ ${result.from.city} (${result.from.iata}) → ${result.to.city} (${result.to.iata}) is about **${result.distanceKm} km**. Fares are calculated at ₹2.0–₹2.5 per km. What's your budget? (e.g. 5000 to 12000)`,
           results: [],
           activeCity,
         });
@@ -516,7 +577,7 @@ app.post("/chat", chatLimiter, chatIdentity, async (req, res) => {
         return sendResponse({
           intent: "flight",
           type: "flight",
-          text: `😕 Nothing between ₹${minPrice.toLocaleString("en-IN")} and ₹${maxPrice.toLocaleString("en-IN")} for ${result.from.city} → ${result.to.city}. ${why}`,
+          text: `${note}😕 Nothing between ₹${minPrice.toLocaleString("en-IN")} and ₹${maxPrice.toLocaleString("en-IN")} for ${result.from.city} → ${result.to.city}. ${why}`,
           results: [],
           activeCity,
         });
@@ -525,7 +586,7 @@ app.post("/chat", chatLimiter, chatIdentity, async (req, res) => {
       return sendResponse({
         intent: "flight",
         type: "flight",
-        text: `✈️ ${result.from.city} → ${result.to.city} · ${result.distanceKm} km · fares ₹2.0–₹2.5/km (₹${minPrice} - ₹${maxPrice}):`,
+        text: `${note}✈️ ${result.from.city} → ${result.to.city} · ${result.distanceKm} km · fares ₹2.0–₹2.5/km (₹${minPrice} - ₹${maxPrice}):`,
         results: flights,
         activeCity,
       });
@@ -610,11 +671,23 @@ app.post('/api/packages/ask', chatLimiter, async (req, res) => {
   res.json({ success: true, ...(await answerPackageQuestion(query, filters)) });
 });
 
-app.get('/api/flights', chatLimiter, (req, res) => {
+app.get('/api/flights', chatLimiter, async (req, res) => {
   if (typeof req.query.from !== 'string' || typeof req.query.to !== 'string' || req.query.from.length > 80 || req.query.to.length > 80) return res.status(400).json({ error: 'Origin and destination are required' });
   const result = buildFlights(req.query.from, req.query.to, 6);
   if (!result.ok) return res.status(400).json({ error: result.error });
-  res.json({ ...result, flights: result.flights.map(f => attachQuote(f, 'flight')) });
+  const estimates = { ...result, live: false, flights: result.flights.map(f => attachQuote(f, 'flight')) };
+  // ?date=YYYY-MM-DD asks for live fares; without a token, or if the provider fails, estimates come back with the reason.
+  const { date } = req.query;
+  if (date === undefined || date === '') return res.json(estimates);
+  if (typeof date !== 'string' || parseTravelDate(date) !== date) return res.status(400).json({ error: 'date must be today or later, as YYYY-MM-DD' });
+  if (!liveFlightsConfigured()) return res.json({ ...estimates, date, live_error: 'Live fares are not configured' });
+  try {
+    const live = await searchLiveFlights({ from: result.from.iata, to: result.to.iata, date, fromCity: result.from.city, toCity: result.to.city });
+    res.json({ ok: true, from: result.from, to: result.to, distanceKm: result.distanceKm, date, live: true, test_mode: live.test_mode, fetched_at: live.fetched_at, skipped_non_inr: live.skipped_non_inr, flights: live.flights.map(f => attachQuote(f, 'flight')) });
+  } catch (err) {
+    console.warn('Live flight search failed:', err.message);
+    res.json({ ...estimates, date, live_error: 'Live fares are unavailable right now' });
+  }
 });
 app.get('/api/buses', chatLimiter, (req, res) => {
   if (typeof req.query.from !== 'string' || typeof req.query.to !== 'string' || req.query.from.length > 80 || req.query.to.length > 80) return res.status(400).json({ error: 'Origin and destination are required' });

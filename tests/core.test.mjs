@@ -30,6 +30,9 @@ const { searchChunks } = await import('../utils/ragChunks.js');
 const { localEmbedding, embedRecords, configuredEmbeddingModel, embeddingProvider, retryPolicy } = await import('../utils/embeddings.js');
 const { answerPackageQuestion } = await import('../utils/packageAnswer.js');
 const { parseTravelPreferences, parseSortIntent } = await import('../utils/travelPreferences.js');
+const { parseTravelDate } = await import('../utils/travelDate.js');
+const { searchLiveFlights, clearLiveFlightCache } = await import('../providers/flightProvider.js');
+const { heuristicIntent } = await import('../llm.js');
 const { buildFlights, haversineKm, resolveAirport, listAirports } = await import('../utils/flightEngine.js');
 const keySecret = crypto.randomBytes(32).toString('hex');
 const webhookSecret = crypto.randomBytes(32).toString('hex');
@@ -705,4 +708,97 @@ test('estimated flights and buses are bookable only under the capped charge', as
   } finally { delete process.env.BOOKING_CHARGE_INR; }
   // A quote issued under the cap cannot be charged in full once the cap is gone.
   assert.throws(() => resolveBooking(quoted));
+});
+
+const duffelSegment = (from, to, dep, arr, number) => ({ origin: { iata_code: from }, destination: { iata_code: to }, departing_at: dep, arriving_at: arr, marketing_carrier: { iata_code: '6E', name: 'IndiGo' }, marketing_carrier_flight_number: number });
+const duffelOffer = (id, amount, currency, segments, duration) => ({ id, total_amount: amount, total_currency: currency, owner: { name: 'IndiGo', iata_code: '6E' }, expires_at: '2026-11-18T12:00:00Z', slices: [{ duration, segments }] });
+// A Duffel stand-in that answers whatever route and date were requested.
+const fakeDuffel = (status = 200, calls = []) => async (url, opts) => {
+  calls.push({ url: String(url), opts });
+  if (status !== 200) return { ok: false, status, json: async () => ({}) };
+  const { origin: o, destination: d, departure_date: day } = JSON.parse(opts.body).data.slices[0];
+  return { ok: true, status, json: async () => ({ data: { offers: [
+    duffelOffer('off_b', '9294.00', 'INR', [duffelSegment(o, 'HYD', `${day}T17:00:00`, `${day}T19:10:00`, '6706'), duffelSegment('HYD', d, `${day}T20:30:00`, `${day}T22:05:00`, '551')], 'PT5H5M'),
+    duffelOffer('off_a', '8946.00', 'INR', [duffelSegment(o, d, `${day}T17:10:00`, `${day}T19:45:00`, '2150')], 'PT2H35M'),
+    duffelOffer('off_c', '80.00', 'GBP', [duffelSegment(o, d, `${day}T09:00:00`, `${day}T11:40:00`, '1')], 'PT2H40M'),
+    { id: 'broken', total_amount: 'n/a', slices: [] },
+  ] } }) };
+};
+
+test('travel dates parse as India calendar days and never mistake budgets for dates', () => {
+  const now = new Date('2026-11-18T10:00:00Z'); // Wednesday 18 Nov, afternoon in India
+  const cases = { 'tomorrow': '2026-11-19', 'day after tomorrow': '2026-11-20', 'fly on 28 Nov': '2026-11-28', 'November 28th, 2026': '2026-11-28', 'nov 28': '2026-11-28', '28/11': '2026-11-28', '28/11/2026': '2026-11-28', '28-11-2026': '2026-11-28', '2026-12-01': '2026-12-01', '5 Oct': '2027-10-05', 'on saturday': '2026-11-21', 'wednesday': '2026-11-25' };
+  for (const [text, iso] of Object.entries(cases)) assert.equal(parseTravelDate(text, now), iso, text);
+  for (const text of ['budget 5-10 thousand', 'under 2.5 lakh', 'flights to goa', 'Rs 5000', '2026-01-01', '30/02', 'I may fly']) assert.equal(parseTravelDate(text, now), null, text);
+  assert.equal(parseTravelDate('today', new Date('2026-11-18T20:00:00Z')), '2026-11-19', '01:30 IST is already the 19th');
+  assert.equal(heuristicIntent('flights from delhi to goa on 28 nov').to, 'Goa', 'the destination stops before "on <date>"');
+});
+
+test('Duffel offers become INR flight cards, cheapest first, cached and never bookable', async () => {
+  const saved = process.env.DUFFEL_ACCESS_TOKEN, calls = [];
+  try {
+    delete process.env.DUFFEL_ACCESS_TOKEN;
+    await assert.rejects(searchLiveFlights({ from: 'DEL', to: 'GOI', date: '2026-11-28' }), /not configured/);
+    process.env.DUFFEL_ACCESS_TOKEN = 'duffel_test_fixture';
+    clearLiveFlightCache();
+    await assert.rejects(searchLiveFlights({ from: 'Delhi', to: 'GOI', date: '2026-11-28' }), /Invalid/);
+    const result = await searchLiveFlights({ from: 'DEL', to: 'GOI', date: '2026-11-28', fromCity: 'Delhi', toCity: 'Goa' }, { fetchImpl: fakeDuffel(200, calls) });
+    assert.deepEqual(result.flights.map(f => f.offer_id), ['off_a', 'off_b']);
+    assert.deepEqual([result.total_offers, result.skipped_non_inr, result.test_mode, result.cached], [4, 1, true, false]);
+    const [nonstop, oneStop] = result.flights;
+    assert.deepEqual(
+      { airline: nonstop.airline, flight_number: nonstop.flight_number, from: nonstop.from, fromIata: nonstop.fromIata, toIata: nonstop.toIata, time: nonstop.time, arrival_time: nonstop.arrival_time, duration: nonstop.duration, stops: nonstop.stops, price: nonstop.price, currency: nonstop.currency, live: nonstop.live, estimated: nonstop.estimated },
+      { airline: 'IndiGo', flight_number: '6E 2150', from: 'Delhi', fromIata: 'DEL', toIata: 'GOI', time: '17:10', arrival_time: '19:45', duration: '2h 35m', stops: 0, price: 8946, currency: 'INR', live: true, estimated: false });
+    assert.deepEqual([oneStop.stops, oneStop.duration, oneStop.arrival_time, oneStop.toIata], [1, '5h 05m', '22:05', 'GOI']);
+    const { headers, body } = calls[0].opts;
+    assert.match(calls[0].url, /^https:\/\/api\.duffel\.com\/air\/offer_requests\?return_offers=true/);
+    assert.equal(headers['Duffel-Version'], 'v2');
+    assert.equal(headers.Authorization, 'Bearer duffel_test_fixture');
+    assert.deepEqual(JSON.parse(body).data, { slices: [{ origin: 'DEL', destination: 'GOI', departure_date: '2026-11-28' }], passengers: [{ type: 'adult' }], cabin_class: 'economy' });
+    assert.equal((await searchLiveFlights({ from: 'DEL', to: 'GOI', date: '2026-11-28' }, { fetchImpl: fakeDuffel(200, calls) })).cached, true);
+    assert.equal(calls.length, 1, 'a repeat search within five minutes is served from the cache');
+    assert.equal(attachQuote(nonstop, 'flight').bookable, false, 'a live fare is shown, never charged');
+    await assert.rejects(searchLiveFlights({ from: 'DEL', to: 'BOM', date: '2026-11-28' }, { fetchImpl: fakeDuffel(422) }), /HTTP 422/);
+  } finally {
+    if (saved === undefined) delete process.env.DUFFEL_ACCESS_TOKEN; else process.env.DUFFEL_ACCESS_TOKEN = saved;
+    clearLiveFlightCache();
+  }
+});
+
+test('chat and /api/flights show live fares for a dated search and say so when they fall back', async () => {
+  const realFetch = globalThis.fetch, saved = process.env.DUFFEL_ACCESS_TOKEN;
+  const tomorrow = parseTravelDate('tomorrow');
+  try {
+    process.env.DUFFEL_ACCESS_TOKEN = 'duffel_live_fixture';
+    clearLiveFlightCache();
+    globalThis.fetch = fakeDuffel(200);
+    const undated = await request(publicApp).post('/chat').send({ message: 'flights from Delhi to Mumbai' }).expect(200);
+    assert.equal(undated.body.type, 'flight');
+    assert.match(undated.body.text, /Which date/);
+    const live = await request(publicApp).post('/chat').send({ message: 'flights from Delhi to Mumbai tomorrow' }).expect(200);
+    assert.equal(live.body.live, true);
+    assert.match(live.body.text, /Live fares Delhi → Mumbai/);
+    assert.deepEqual(live.body.results.map(f => [f.flight_number, f.price, f.bookable]), [['6E 2150', 8946, false], ['6E 6706', 9294, false]]);
+    const capped = await request(publicApp).post('/chat').send({ message: 'flights from Delhi to Mumbai tomorrow under 9000' }).expect(200);
+    assert.deepEqual(capped.body.results.map(f => f.price), [8946]);
+
+    const api = await request(publicApp).get('/api/flights').query({ from: 'DEL', to: 'BOM', date: tomorrow }).expect(200);
+    assert.equal(api.body.live, true);
+    assert.ok(api.body.flights.length === 2 && api.body.flights.every(f => f.live && f.bookable === false));
+    await request(publicApp).get('/api/flights').query({ from: 'DEL', to: 'BOM', date: '2020-01-01' }).expect(400);
+
+    // The provider failing must not break search: estimates come back, labelled as such.
+    clearLiveFlightCache();
+    globalThis.fetch = fakeDuffel(503);
+    const fallback = await request(publicApp).post('/chat').send({ message: 'flights from Delhi to Chennai tomorrow' }).expect(200);
+    assert.match(fallback.body.text, /Live fares are unavailable right now, so these are estimates/);
+    const apiFallback = await request(publicApp).get('/api/flights').query({ from: 'DEL', to: 'MAA', date: tomorrow }).expect(200);
+    assert.equal(apiFallback.body.live, false);
+    assert.match(apiFallback.body.live_error, /unavailable/);
+    assert.ok(apiFallback.body.flights.every(f => f.estimated));
+  } finally {
+    globalThis.fetch = realFetch;
+    if (saved === undefined) delete process.env.DUFFEL_ACCESS_TOKEN; else process.env.DUFFEL_ACCESS_TOKEN = saved;
+    clearLiveFlightCache();
+  }
 });

@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="TravoAI">
+  <defs>
+    <linearGradient id="m-bg" x1="0" y1="512" x2="512" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#06b6d4"/><stop offset="0.5" stop-color="#0ea5e9"/><stop offset="1" stop-color="#2563eb"/>
+    </linearGradient>
+    <radialGradient id="m-glow" cx="120" cy="90" r="420" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.28"/><stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="512" height="512" rx="118" fill="url(#m-bg)"/>
+  <rect width="512" height="512" rx="118" fill="url(#m-glow)"/>
+  <path d="M86 428 C 128 368 192 362 236 404" fill="none" stroke="#ffffff" stroke-opacity="0.8" stroke-width="15" stroke-linecap="round" stroke-dasharray="0 29"/>
+  <ellipse cx="300" cy="420" rx="54" ry="11" fill="#0b1220" fill-opacity="0.18"/>
+  <path d="M300 404 C 288 386 204 300 204 196 A 96 96 0 1 1 396 196 C 396 300 312 386 300 404 Z" fill="#ffffff"/>
+  <circle cx="300" cy="196" r="48" fill="url(#m-bg)"/>
+  <g fill="none" stroke="#ffffff" stroke-width="7" stroke-linecap="round">
+    <circle cx="300" cy="196" r="31"/>
+    <ellipse cx="300" cy="196" rx="13" ry="31"/>
+    <path d="M270 196 H330"/>
+  </g>
+  <path d="M132 86 C 136.158 128.12 143.88 135.842 186 140 C 143.88 144.158 136.158 151.88 132 194 C 127.842 151.88 120.12 144.158 78 140 C 120.12 135.842 127.842 128.12 132 86 Z" fill="#ffffff"/>
+  <path d="M196 52 C 197.694 69.16 200.84 72.306 218 74 C 200.84 75.694 197.694 78.84 196 96 C 194.306 78.84 191.16 75.694 174 74 C 191.16 72.306 194.306 69.16 196 52 Z" fill="#ffffff" fill-opacity="0.85"/>
+</svg>
