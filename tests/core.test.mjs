@@ -25,10 +25,11 @@ const { default: userRoutes } = await import('../routes/user.js');
 const { default: User } = await import('../models/User.js');
 const { toPaise, resolveBooking, attachQuote } = await import('../utils/checkout.js');
 const { loadAllPackages, retrievePackages, syncVectraIndex, vectraIndex, chunkGuide, ingestPackageGuide } = await import('../utils/ragEngine.js');
-const { rankChunks } = await import('../utils/retrieval.js');
+const { rankChunks, normalizeMoney } = await import('../utils/retrieval.js');
 const { searchChunks } = await import('../utils/ragChunks.js');
-const { localEmbedding } = await import('../utils/embeddings.js');
-const { parseTravelPreferences } = await import('../utils/travelPreferences.js');
+const { localEmbedding, embedRecords, configuredEmbeddingModel, embeddingProvider, retryPolicy } = await import('../utils/embeddings.js');
+const { answerPackageQuestion } = await import('../utils/packageAnswer.js');
+const { parseTravelPreferences, parseSortIntent } = await import('../utils/travelPreferences.js');
 const { buildFlights, haversineKm, resolveAirport, listAirports } = await import('../utils/flightEngine.js');
 const keySecret = crypto.randomBytes(32).toString('hex');
 const webhookSecret = crypto.randomBytes(32).toString('hex');
@@ -154,7 +155,97 @@ test('137+ catalogue skeletons, INR spectrum and one valid full guide', () => {
   const chunks = chunkGuide(sample.detailed_guide);
   assert.ok(chunks.length >= 6);
   assert.ok(chunks.every(c => c.text.split(/\s+/).length <= 350));
-  assert.equal(chunks[0].text.split(/\s+/).slice(-60).join(' '), chunks[1].text.split(/\s+/).slice(0, 60).join(' '));
+  // Chunks follow section boundaries; overlap now applies only inside a section that had to be split.
+  assert.equal(chunks[0].section.split(' / ')[0], 'Overview');
+  const continued = chunks.slice(1).filter((c, i) => c.section === chunks[i].section);
+  assert.ok(continued.length > 0, 'the 550-word day-by-day section must be split');
+  for (const c of continued) assert.equal(chunks[chunks.indexOf(c) - 1].text.split(/\s+/).slice(-60).join(' '), c.text.split(/\s+/).slice(0, 60).join(' '));
+});
+test('guide chunks never straddle sections unless whole short sections are grouped', () => {
+  const body = (n, tag) => Array.from({ length: n }, (_, i) => `${tag}${i}`).join(' ');
+  const guide = `# Title\n\n## A\n\n${body(120, 'a')}\n\n## B\n\n${body(120, 'b')}\n\n## C\n\n${body(120, 'c')}\n\n## D\n\n${body(700, 'd')}\n`;
+  const chunks = chunkGuide(guide);
+  assert.deepEqual(chunks.slice(0, 2).map(c => c.section), ['A / B', 'C']);
+  assert.ok(!chunks[0].text.includes('c0 ') && chunks[0].text.endsWith('b119'));
+  assert.ok(chunks.slice(2).every(c => c.section === 'D' && c.text.split(' ').length <= 350));
+  assert.equal(chunks.filter(c => c.section === 'D').length, 3);
+});
+test('rupee amounts normalise to one searchable token, so exact prices match lexically', async () => {
+  assert.equal(normalizeMoney('₹53,000').trim(), 'inr53000');
+  assert.equal(normalizeMoney('Rs 53000').trim(), 'inr53000');
+  assert.equal(normalizeMoney('INR 53000').trim(), 'inr53000');
+  assert.equal(normalizeMoney('2.5 lakh').trim(), 'inr250000');
+  assert.equal(normalizeMoney('53k').trim(), 'inr53000');
+  assert.equal(normalizeMoney('5 days 4 nights in 2026, tours 5 km'), '5 days 4 nights in 2026, tours 5 km');
+  const items = ['Total price ₹41,000 for 2 guests', 'Total price ₹53,000 for 2 guests', 'Total price ₹67,000 for 2 guests'].map((text, id) => ({ id: String(id), vector: [], metadata: { text } }));
+  const { scores } = await rankChunks(items, 'which package costs 53000');
+  assert.match(scores[0].item.metadata.text, /53,000/);
+});
+test('price facts records carry the exact catalogue price', async () => {
+  const result = await searchChunks('what does it cost', { packageId: 'PKG-GOA-PRE', kind: 'facts', topK: 5 });
+  assert.equal(result.chunks.length, 1);
+  assert.match(result.chunks[0].text, /₹53,000/);
+  assert.match(result.chunks[0].text, /₹26,500 per person/);
+});
+test('"cheapest" and "most expensive" sort by the structured price, not by prose similarity', async () => {
+  assert.equal(parseSortIntent('cheapest Goa package'), 'price_asc');
+  assert.equal(parseSortIntent('what is your most expensive trip'), 'price_desc');
+  assert.equal(parseSortIntent('best rated hotel'), 'rating_desc');
+  assert.equal(parseSortIntent('Goa beaches'), null);
+  const asc = (await retrievePackages('cheapest packages in Goa', {}, 10)).matches.map(p => p.price_inr);
+  assert.ok(asc.length >= 3 && asc.every((p, i) => i === 0 || asc[i - 1] <= p));
+  const desc = (await retrievePackages('most expensive packages in Goa', {}, 10)).matches.map(p => p.price_inr);
+  assert.ok(desc.every((p, i) => i === 0 || desc[i - 1] >= p));
+  assert.equal(asc[0], Math.min(...asc));
+  const answer = (await answerPackageQuestion('cheapest package in Goa', {})).answer;
+  assert.match(answer, /lowest-priced/);
+  assert.match(answer, new RegExp(`₹${asc[0].toLocaleString('en-IN')}`));
+  assert.match((await answerPackageQuestion('how many Goa packages under 60k', {})).answer, /\*\*\d+\*\* packages? match/);
+});
+test('embedding batches retry rate limits, resume from cache and never store fallbacks in strict mode', async () => {
+  const realFetch = globalThis.fetch, calls = [];
+  const vector = seed => Array.from({ length: 768 }, (_, k) => (k === seed % 768 ? 1 : 0.01));
+  const respond = (status, texts) => ({ ok: status === 200, status, json: async () => ({ embeddings: texts.map((_, i) => ({ values: vector(i) })) }) });
+  const savedDelays = retryPolicy.delaysMs;
+  Object.assign(process.env, { EMBEDDING_PROVIDER: '', GEMINI_API_KEY: 'test-key' });
+  retryPolicy.delaysMs = [1, 1, 1];
+  try {
+    assert.equal(configuredEmbeddingModel(), 'gemini-embedding-001');
+    const texts = Array.from({ length: 120 }, (_, i) => `batch embedding fixture ${i} ${crypto.randomUUID()}`);
+    let failFirst = true;
+    globalThis.fetch = async (url, opts) => {
+      const body = JSON.parse(opts.body); calls.push({ url: String(url), count: body.requests?.length });
+      if (failFirst) { failFirst = false; return respond(429, []); }
+      return respond(200, body.requests);
+    };
+    const out = await embedRecords(texts, { strict: true });
+    assert.ok(out.every(r => r.model === 'gemini-embedding-001' && r.provider === 'gemini' && r.vector.length === 768));
+    assert.ok(Math.abs(Math.hypot(...out[0].vector) - 1) < 1e-9);
+    assert.deepEqual(calls.map(c => c.count), [50, 50, 50, 20], 'one 429 retry, then 50 + 50 + 20 texts');
+    assert.ok(calls.every(c => c.url.includes(':batchEmbedContents')));
+    calls.length = 0;
+    await embedRecords(texts, { strict: true });
+    assert.equal(calls.length, 0, 'a repeated run is served from the cache');
+
+    // Strict: a permanent outage throws and returns no local vectors, and the cooldown stays off.
+    globalThis.fetch = async () => respond(500, []);
+    await assert.rejects(embedRecords(['never embedded ' + crypto.randomUUID()], { strict: true }), /HTTP 500/);
+    assert.equal(embeddingProvider(), 'gemini');
+
+    // The strict index build leaves existing vectors alone when Gemini is down.
+    const before = (await vectraIndex.listItems()).map(i => `${i.id}:${i.metadata.embedding_model}`).sort();
+    await assert.rejects(syncVectraIndex({ force: true }), /HTTP 500/);
+    assert.deepEqual((await vectraIndex.listItems()).map(i => `${i.id}:${i.metadata.embedding_model}`).sort(), before);
+
+    // Non-strict (queries, PDFs) degrades to local vectors, but the configured model name does not flip.
+    const fallback = await embedRecords(['fallback ' + crypto.randomUUID()]);
+    assert.equal(fallback[0].model, 'local-hash-v2');
+    assert.equal(embeddingProvider(), 'local');
+    assert.equal(configuredEmbeddingModel(), 'gemini-embedding-001');
+  } finally {
+    globalThis.fetch = realFetch; retryPolicy.delaysMs = savedDelays;
+    Object.assign(process.env, { EMBEDDING_PROVIDER: 'local', GEMINI_API_KEY: '' });
+  }
 });
 test('RAG force sync replaces records and never duplicates them', async () => {
   await syncVectraIndex({ force: true }); const initial = await vectraIndex.listItems();

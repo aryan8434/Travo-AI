@@ -11,3 +11,16 @@ export function parseTravelPreferences(text = '') {
     ...(/\b(luxury|opulent)\b/.test(lower) ? { budgetTier: 'luxury' } : /\b(premium|comfortable|mid.?range)\b/.test(lower) ? { budgetTier: 'premium' } : /\b(economical|cheap|backpacking)\b/.test(lower) ? { budgetTier: 'economical' } : {}),
   };
 }
+
+/**
+ * Ordering the traveller asked for in words. Prices live in structured fields, so
+ * "cheapest Goa package" is answered by sorting rows, not by embedding similarity.
+ * @returns {'price_asc' | 'price_desc' | 'rating_desc' | null}
+ */
+export function parseSortIntent(text = '') {
+  const lower = String(text).toLowerCase();
+  if (/\b(cheapest|lowest[- ]priced?|least expensive|most affordable|lowest price|lowest cost)\b/.test(lower)) return 'price_asc';
+  if (/\b(most expensive|priciest|costliest|highest[- ]priced?|highest price|highest cost)\b/.test(lower)) return 'price_desc';
+  if (/\b(top[- ]rated|best[- ]rated|highest[- ]rated|highest rating)\b/.test(lower)) return 'rating_desc';
+  return null;
+}
