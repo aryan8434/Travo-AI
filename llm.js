@@ -250,7 +250,7 @@ export function heuristicIntent(message = "") {
     !/(flight|fly|bus|hotel|train|package|trip|weather|book|yes|no|thanks|hi|hello|help)/.test(m);
 
   // "from X to Y" — capture both, stopping Y before any budget/time words
-  const fromTo = m.match(/from\s+([a-z][a-z\s]{1,28}?)\s+to\s+([a-z][a-z\s]{1,28}?)(?:\s+(?:under|below|for|budget|tomorrow|today|after|before|between|\d)|[.,?!]|$)/);
+  const fromTo = m.match(/from\s+([a-z][a-z\s]{1,28}?)\s+to\s+([a-z][a-z\s]{1,28}?)(?:\s+(?:under|below|for|budget|tomorrow|today|on|next|this|after|before|between|\d)|[.,?!]|$)/);
 
   const base = {
     intent: "general", budget: null, minPrice: null, maxPrice: null,
